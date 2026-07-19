@@ -54,13 +54,13 @@ jobs:
           "RELEASE_PACKAGE=$package" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Publish or refresh GitHub release
-        shell: powershell
+        shell: cmd
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY *> $null
-          if ($LASTEXITCODE -eq 0) {
-            gh release upload $env:RELEASE_TAG Dashboard.exe Dashboard.exe.sha256 $env:RELEASE_PACKAGE --clobber --repo $env:GITHUB_REPOSITORY
-          } else {
-            gh release create $env:RELEASE_TAG Dashboard.exe Dashboard.exe.sha256 $env:RELEASE_PACKAGE --verify-tag --generate-notes --title "Projector Dashboard $env:RELEASE_TAG" --repo $env:GITHUB_REPOSITORY
-          }
+          gh release view "%RELEASE_TAG%" --repo "%GITHUB_REPOSITORY%" >nul 2>&1
+          if errorlevel 1 (
+            gh release create "%RELEASE_TAG%" Dashboard.exe Dashboard.exe.sha256 "%RELEASE_PACKAGE%" --verify-tag --generate-notes --title "Projector Dashboard %RELEASE_TAG%" --repo "%GITHUB_REPOSITORY%"
+          ) else (
+            gh release upload "%RELEASE_TAG%" Dashboard.exe Dashboard.exe.sha256 "%RELEASE_PACKAGE%" --clobber --repo "%GITHUB_REPOSITORY%"
+          )
