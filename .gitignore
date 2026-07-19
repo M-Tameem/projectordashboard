@@ -1,0 +1,11 @@
+Dashboard.exe
+Dashboard.exe.update
+Dashboard.exe.previous
+Dashboard.exe.sha256
+ProjectorDashboard-*-win-x86.zip
+.agents/
+.codex/
+.compile-check/
+.visual-check/
+*.user
+*.suo

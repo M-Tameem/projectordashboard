@@ -1,0 +1,66 @@
+name: Build release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing v1.2.3 tag to publish"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Stamp version from tag
+        shell: powershell
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v(\d+)\.(\d+)\.(\d+)$') {
+            throw "Release tag must look exactly like v1.2.3"
+          }
+          $productVersion = "$($Matches[1]).$($Matches[2]).$($Matches[3])"
+          $assemblyVersion = "$productVersion.0"
+          $path = 'src\VersionInfo.cs'
+          $source = Get-Content -Raw -LiteralPath $path
+          $source = $source -replace 'public const string ProductVersion = "[^"]+";', "public const string ProductVersion = `"$productVersion`";"
+          $source = $source -replace 'public const string AssemblyVersion = "[^"]+";', "public const string AssemblyVersion = `"$assemblyVersion`";"
+          Set-Content -LiteralPath $path -Value $source -Encoding UTF8
+
+      - name: Build 32-bit Windows executable
+        shell: cmd
+        run: build.bat --ci
+
+      - name: Create release assets
+        shell: powershell
+        run: |
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath 'Dashboard.exe').Hash.ToLowerInvariant()
+          "$hash  Dashboard.exe" | Set-Content -LiteralPath 'Dashboard.exe.sha256' -Encoding ASCII
+          $package = "ProjectorDashboard-$env:RELEASE_TAG-win-x86.zip"
+          Compress-Archive -LiteralPath 'Dashboard.exe','README.md','install-startup.bat','uninstall-startup.bat' -DestinationPath $package
+          "RELEASE_PACKAGE=$package" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Publish or refresh GitHub release
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:RELEASE_TAG Dashboard.exe Dashboard.exe.sha256 $env:RELEASE_PACKAGE --clobber --repo $env:GITHUB_REPOSITORY
+          } else {
+            gh release create $env:RELEASE_TAG Dashboard.exe Dashboard.exe.sha256 $env:RELEASE_PACKAGE --verify-tag --generate-notes --title "Projector Dashboard $env:RELEASE_TAG" --repo $env:GITHUB_REPOSITORY
+          }
