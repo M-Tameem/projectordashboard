@@ -9,21 +9,156 @@ namespace ProjectorDash
 {
     /// <summary>
     /// Theme + small factory helpers so every control on the dashboard is
-    /// built from the same handful of colors and sizes. The palette stays
-    /// nearly black at night, with a restrained cyan instrument-panel accent.
+    /// built from the same handful of colors and sizes. Every palette stays
+    /// nearly black at night, but the complete app can change hue together.
     /// </summary>
     public static class Ui
     {
-        // Palette
-        public static readonly Brush Bg        = Hex("#060A0E"); // near-black, cool tint
-        public static readonly Brush Panel     = Hex("#0D151C"); // card surface
-        public static readonly Brush PanelHi   = Hex("#121F28"); // raised surface
-        public static readonly Brush Line      = Hex("#1C3540"); // hairline borders
-        public static readonly Brush Text      = Hex("#EDF7F8"); // cool white
-        public static readonly Brush TextDim   = Hex("#79909A"); // secondary
-        public static readonly Brush Accent    = Hex("#59DCE2"); // quiet cyan
-        public static readonly Brush AccentDim = Hex("#10363C"); // deep cyan fill
-        public static readonly Brush Danger    = Hex("#EE7180");
+        public static readonly string[] ThemeNames =
+            new string[] { "Cyan", "Amber", "Violet", "Emerald" };
+
+        public static string ThemeName { get; private set; }
+        public static Brush Bg { get; private set; }
+        public static Brush Panel { get; private set; }
+        public static Brush PanelHi { get; private set; }
+        public static Brush Line { get; private set; }
+        public static Brush Text { get; private set; }
+        public static Brush TextDim { get; private set; }
+        public static Brush Accent { get; private set; }
+        public static Brush AccentDim { get; private set; }
+        public static Brush Danger { get; private set; }
+
+        // Structural and semantic colors used outside the small control
+        // factories. Keeping them here prevents one screen from remaining
+        // cyan after the user changes the rest of the app.
+        public static Brush SurfaceLow { get; private set; }
+        public static Brush Overlay { get; private set; }
+        public static Brush SkyBg { get; private set; }
+        public static Brush SourceDim { get; private set; }
+        public static Brush ReservedDim { get; private set; }
+        public static Brush Ink { get; private set; }
+        public static Brush Sunrise { get; private set; }
+        public static Brush Planet { get; private set; }
+        public static Brush Star { get; private set; }
+        public static Brush IssLine { get; private set; }
+        public static Brush MapCorner { get; private set; }
+        public static Brush MapGrid { get; private set; }
+        public static Brush MapGridText { get; private set; }
+        public static Brush MapZenith { get; private set; }
+        public static Brush AircraftHistory { get; private set; }
+        public static Brush AircraftOutline { get; private set; }
+        public static Brush AircraftCourse { get; private set; }
+        public static Brush LabelBg { get; private set; }
+        public static Brush LabelLine { get; private set; }
+        public static Brush DangerFill { get; private set; }
+        public static Brush DangerText { get; private set; }
+        public static Brush AlarmShade { get; private set; }
+        public static Brush ComboText { get; private set; }
+        public static Brush ReturnShade { get; private set; }
+
+        private static string _gradientStart;
+        private static string _gradientMid;
+        private static string _gradientEnd;
+        private static string _projectorCenter;
+        private static string _projectorOuter;
+
+        static Ui()
+        {
+            ApplyTheme("Cyan");
+        }
+
+        public static string NormalizeTheme(string name)
+        {
+            foreach (string candidate in ThemeNames)
+            {
+                if (string.Equals(candidate, name, StringComparison.OrdinalIgnoreCase))
+                    return candidate;
+            }
+            return "Cyan";
+        }
+
+        public static string NextTheme(string current)
+        {
+            string normalized = NormalizeTheme(current);
+            for (int i = 0; i < ThemeNames.Length; i++)
+                if (ThemeNames[i] == normalized)
+                    return ThemeNames[(i + 1) % ThemeNames.Length];
+            return ThemeNames[0];
+        }
+
+        public static void ApplyTheme(string name)
+        {
+            ThemeName = NormalizeTheme(name);
+            if (ThemeName == "Amber")
+            {
+                Bg = Hex("#0D0904"); Panel = Hex("#191208"); PanelHi = Hex("#241A0D");
+                Line = Hex("#49351C"); Text = Hex("#FFF8E8"); TextDim = Hex("#B39A72");
+                Accent = Hex("#FFBE55"); AccentDim = Hex("#4A2D0C");
+                SurfaceLow = Hex("#160E05"); Overlay = Hex("#100B05"); SkyBg = Hex("#090603");
+                SourceDim = Hex("#8A6A3B"); ReservedDim = Hex("#73562E"); Ink = Hex("#171005");
+                MapCorner = Hex("#71532C"); MapGrid = Hex("#35230D"); MapGridText = Hex("#76542B");
+                MapZenith = Hex("#9C7640"); AircraftHistory = Hex("#B77924");
+                AircraftOutline = Hex("#FFF1CB"); AircraftCourse = Hex("#654115");
+                LabelBg = Hex("#130D05"); LabelLine = Hex("#513517");
+                _gradientStart = "#090603"; _gradientMid = "#160E05"; _gradientEnd = "#2A1907";
+                _projectorCenter = "#2B1B08"; _projectorOuter = "#080503";
+            }
+            else if (ThemeName == "Violet")
+            {
+                Bg = Hex("#090710"); Panel = Hex("#15111F"); PanelHi = Hex("#20182E");
+                Line = Hex("#3B2A55"); Text = Hex("#F8F1FF"); TextDim = Hex("#9B8EAD");
+                Accent = Hex("#B798FF"); AccentDim = Hex("#2C1D50");
+                SurfaceLow = Hex("#110C1B"); Overlay = Hex("#0D0915"); SkyBg = Hex("#07050C");
+                SourceDim = Hex("#75658B"); ReservedDim = Hex("#635478"); Ink = Hex("#110A1B");
+                MapCorner = Hex("#594472"); MapGrid = Hex("#251936"); MapGridText = Hex("#5F4A77");
+                MapZenith = Hex("#8774A0"); AircraftHistory = Hex("#7556B7");
+                AircraftOutline = Hex("#F2E9FF"); AircraftCourse = Hex("#432B67");
+                LabelBg = Hex("#100B18"); LabelLine = Hex("#38254F");
+                _gradientStart = "#07050C"; _gradientMid = "#100B1A"; _gradientEnd = "#211238";
+                _projectorCenter = "#26183A"; _projectorOuter = "#06040A";
+            }
+            else if (ThemeName == "Emerald")
+            {
+                Bg = Hex("#050B09"); Panel = Hex("#0B1713"); PanelHi = Hex("#10231C");
+                Line = Hex("#1D4437"); Text = Hex("#EEFDF7"); TextDim = Hex("#7FA092");
+                Accent = Hex("#58E6AB"); AccentDim = Hex("#103B2B");
+                SurfaceLow = Hex("#08140F"); Overlay = Hex("#07100D"); SkyBg = Hex("#030906");
+                SourceDim = Hex("#4E7665"); ReservedDim = Hex("#406653"); Ink = Hex("#04150E");
+                MapCorner = Hex("#285A48"); MapGrid = Hex("#0E2B20"); MapGridText = Hex("#376C58");
+                MapZenith = Hex("#61917C"); AircraftHistory = Hex("#299E70");
+                AircraftOutline = Hex("#DFFFF2"); AircraftCourse = Hex("#15553D");
+                LabelBg = Hex("#06120D"); LabelLine = Hex("#174A37");
+                _gradientStart = "#030806"; _gradientMid = "#07150F"; _gradientEnd = "#0B2A1E";
+                _projectorCenter = "#0B2B20"; _projectorOuter = "#020805";
+            }
+            else
+            {
+                Bg = Hex("#060A0E"); Panel = Hex("#0D151C"); PanelHi = Hex("#121F28");
+                Line = Hex("#1C3540"); Text = Hex("#EDF7F8"); TextDim = Hex("#79909A");
+                Accent = Hex("#59DCE2"); AccentDim = Hex("#10363C");
+                SurfaceLow = Hex("#091218"); Overlay = Hex("#071015"); SkyBg = Hex("#04090C");
+                SourceDim = Hex("#4D6971"); ReservedDim = Hex("#3E5961"); Ink = Hex("#041014");
+                MapCorner = Hex("#25434B"); MapGrid = Hex("#132A31"); MapGridText = Hex("#38525A");
+                MapZenith = Hex("#78939A"); AircraftHistory = Hex("#317D86");
+                AircraftOutline = Hex("#D5FFFF"); AircraftCourse = Hex("#1B4851");
+                LabelBg = Hex("#071116"); LabelLine = Hex("#1C3941");
+                _gradientStart = "#05090C"; _gradientMid = "#071218"; _gradientEnd = "#0A2027";
+                _projectorCenter = "#0B2228"; _projectorOuter = "#03070A";
+            }
+
+            // Object-category and warning colors retain their meaning while
+            // every surrounding surface and instrument line follows the theme.
+            Danger = Hex("#EE7180");
+            Sunrise = Hex("#F4C66A");
+            Planet = Hex("#A99BE8");
+            Star = Hex("#61737D");
+            IssLine = Hex("#806A3D");
+            DangerFill = Hex("#461721");
+            DangerText = Hex("#FFF4F5");
+            AlarmShade = Hex("#E60B0810");
+            ComboText = Hex("#17131F");
+            ReturnShade = Hex("#EB0C0A14");
+        }
 
         // Shared black -> deep-blue wash used as the controller backdrop.
         public static Brush BgGradient()
@@ -32,11 +167,26 @@ namespace ProjectorDash
             g.StartPoint = new Point(0.1, 0.0);
             g.EndPoint   = new Point(0.9, 1.0);
             g.GradientStops.Add(new GradientStop(
-                    (Color)ColorConverter.ConvertFromString("#05090C"), 0.0));
+                    (Color)ColorConverter.ConvertFromString(_gradientStart), 0.0));
             g.GradientStops.Add(new GradientStop(
-                    (Color)ColorConverter.ConvertFromString("#071218"), 0.58));
+                    (Color)ColorConverter.ConvertFromString(_gradientMid), 0.58));
             g.GradientStops.Add(new GradientStop(
-                    (Color)ColorConverter.ConvertFromString("#0A2027"), 1.0));
+                    (Color)ColorConverter.ConvertFromString(_gradientEnd), 1.0));
+            g.Freeze();
+            return g;
+        }
+
+        public static Brush ProjectorGradient()
+        {
+            RadialGradientBrush g = new RadialGradientBrush();
+            g.Center = new Point(0.5, 0.48);
+            g.GradientOrigin = new Point(0.5, 0.48);
+            g.RadiusX = 0.92;
+            g.RadiusY = 0.92;
+            g.GradientStops.Add(new GradientStop(
+                (Color)ColorConverter.ConvertFromString(_projectorCenter), 0.0));
+            g.GradientStops.Add(new GradientStop(
+                (Color)ColorConverter.ConvertFromString(_projectorOuter), 1.0));
             g.Freeze();
             return g;
         }
@@ -134,7 +284,7 @@ namespace ProjectorDash
 
             TextBlock title = new TextBlock();
             title.Text = name;
-            title.FontSize = 26;
+            title.FontSize = 22;
             title.FontFamily = new FontFamily(FontUi);
             title.FontWeight = FontWeights.SemiBold;
             title.Foreground = Text;
@@ -144,7 +294,7 @@ namespace ProjectorDash
 
             TextBlock sub = new TextBlock();
             sub.Text = detail;
-            sub.FontSize = 13;
+            sub.FontSize = 12;
             sub.Foreground = TextDim;
             sub.TextAlignment = TextAlignment.Center;
             sub.TextTrimming = TextTrimming.CharacterEllipsis;
@@ -157,9 +307,9 @@ namespace ProjectorDash
             body.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
             Border badge = new Border();
-            badge.Width = 46;
-            badge.Height = 46;
-            badge.Margin = new Thickness(14, 0, 12, 0);
+            badge.Width = 36;
+            badge.Height = 36;
+            badge.Margin = new Thickness(10, 0, 9, 0);
             badge.Background = AccentDim;
             badge.BorderBrush = Line;
             badge.BorderThickness = new Thickness(1);
@@ -168,15 +318,15 @@ namespace ProjectorDash
             {
                 Image image = new Image();
                 image.Source = icon;
-                image.Width = 34;
-                image.Height = 34;
+                image.Width = 26;
+                image.Height = 26;
                 image.Stretch = Stretch.Uniform;
                 badge.Child = image;
             }
             else
             {
                 string initial = string.IsNullOrEmpty(name) ? "?" : name.Substring(0, 1).ToUpperInvariant();
-                TextBlock letter = Label(initial, 24, Accent);
+                TextBlock letter = Label(initial, 19, Accent);
                 letter.FontWeight = FontWeights.Bold;
                 letter.HorizontalAlignment = HorizontalAlignment.Center;
                 letter.VerticalAlignment = VerticalAlignment.Center;
@@ -189,8 +339,8 @@ namespace ProjectorDash
             Button b = new Button();
             b.Content = body;
             b.Width = 196;
-            b.Height = 110;
-            b.Margin = new Thickness(7);
+            b.Height = 62;
+            b.Margin = new Thickness(3);
             b.Background = Panel;
             b.BorderBrush = Line;
             b.BorderThickness = new Thickness(1);

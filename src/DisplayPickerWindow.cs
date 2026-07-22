@@ -69,7 +69,7 @@ namespace ProjectorDash
             identify.Margin = new Thickness(0, 0, 12, 0);
             actions.Children.Add(identify);
 
-            _okButton = Ui.Btn("Save and start", 16, Ui.Accent, Ui.Hex("#141210"), OnOk);
+            _okButton = Ui.Btn("Save and start", 16, Ui.Accent, Ui.Ink, OnOk);
             _okButton.IsEnabled = false;
             actions.Children.Add(_okButton);
 
@@ -147,9 +147,9 @@ namespace ProjectorDash
         private void Restyle(Row r)
         {
             r.TabletBtn.Background = (r.Role == "tablet") ? Ui.Accent : Ui.PanelHi;
-            r.TabletBtn.Foreground = (r.Role == "tablet") ? Ui.Hex("#141210") : Ui.Text;
+                r.TabletBtn.Foreground = (r.Role == "tablet") ? Ui.Ink : Ui.Text;
             r.ProjectorBtn.Background = (r.Role == "projector") ? Ui.Accent : Ui.PanelHi;
-            r.ProjectorBtn.Foreground = (r.Role == "projector") ? Ui.Hex("#141210") : Ui.Text;
+                r.ProjectorBtn.Foreground = (r.Role == "projector") ? Ui.Ink : Ui.Text;
         }
 
         private void OnOk(object sender, RoutedEventArgs e)
@@ -181,7 +181,7 @@ namespace ProjectorDash
                 w.ShowActivated = false;
 
                 Border badge = new Border();
-                badge.Background = Ui.Hex("#DD141210");
+            badge.Background = Ui.ReturnShade;
                 badge.BorderBrush = Ui.Accent;
                 badge.BorderThickness = new Thickness(2);
                 badge.CornerRadius = new CornerRadius(20);

@@ -35,17 +35,7 @@ namespace ProjectorDash
             ShowActivated = false;
             Cursor = System.Windows.Input.Cursors.None;
 
-            RadialGradientBrush bg = new RadialGradientBrush();
-            bg.Center = new Point(0.5, 0.48);
-            bg.GradientOrigin = new Point(0.5, 0.48);
-            bg.RadiusX = 0.92;
-            bg.RadiusY = 0.92;
-            bg.GradientStops.Add(new GradientStop(
-                (Color)ColorConverter.ConvertFromString("#0B2228"), 0.0));
-            bg.GradientStops.Add(new GradientStop(
-                (Color)ColorConverter.ConvertFromString("#03070A"), 1.0));
-            bg.Freeze();
-            Background = bg;
+            Background = Ui.ProjectorGradient();
 
             _ambient = new Grid { Margin = new Thickness(60, 40, 60, 42) };
             _ambient.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
@@ -104,7 +94,7 @@ namespace ProjectorDash
             _weatherDetail.Margin = new Thickness(0, 10, 0, 0);
             _weatherDetail.TextWrapping = TextWrapping.Wrap;
             weather.Children.Add(_weatherDetail);
-            _sunrise = Ui.Label("NEXT SUNRISE  --", 16, Ui.Hex("#F4C66A"));
+            _sunrise = Ui.Label("NEXT SUNRISE  --", 16, Ui.Sunrise);
             _sunrise.Margin = new Thickness(0, 12, 0, 0);
             _sunrise.FontWeight = FontWeights.SemiBold;
             weather.Children.Add(_sunrise);
@@ -114,7 +104,7 @@ namespace ProjectorDash
             _ambient.Children.Add(center);
 
             Border skyBar = new Border();
-            skyBar.Background = Ui.Hex("#091318");
+            skyBar.Background = Ui.SurfaceLow;
             skyBar.BorderBrush = Ui.Line;
             skyBar.BorderThickness = new Thickness(1);
             skyBar.CornerRadius = new CornerRadius(8);
@@ -137,7 +127,7 @@ namespace ProjectorDash
             Grid.SetRow(skyBar, 2);
             _ambient.Children.Add(skyBar);
 
-            _overhead = new Grid { Background = Ui.Hex("#050B0F") };
+            _overhead = new Grid { Background = Ui.SkyBg };
             _overheadMap = new OverheadMap { Margin = new Thickness(28) };
             _overhead.Children.Add(_overheadMap);
             _overhead.Visibility = Visibility.Collapsed;

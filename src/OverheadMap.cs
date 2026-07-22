@@ -16,7 +16,10 @@ namespace ProjectorDash
     /// </summary>
     public sealed class OverheadMap : FrameworkElement
     {
-        private const double MinimumAircraftElevation = 5.0;
+        private double MinimumAircraftElevation
+        {
+            get { return _sky != null && _sky.AircraftRadiusKm > 40 ? 0.5 : 5.0; }
+        }
         private sealed class TrackSample
         {
             public DateTime AtUtc;
@@ -52,6 +55,7 @@ namespace ProjectorDash
 
         private SkyReading _sky;
         private int _facingDegrees;
+        private int _aircraftRadiusKm = 40;
         private DateTime _celestialUpdatedUtc = DateTime.MinValue;
         private List<PlanetReading> _livePlanets = new List<PlanetReading>();
         private List<StarReading> _liveStars = new List<StarReading>();
@@ -84,6 +88,11 @@ namespace ProjectorDash
             _facingDegrees = Normalize(facingDegrees);
             if (sky != null)
             {
+                if (sky.AircraftRadiusKm != _aircraftRadiusKm)
+                {
+                    _tracks.Clear();
+                    _aircraftRadiusKm = sky.AircraftRadiusKm;
+                }
                 RecordAircraft(sky);
                 RecordIss(sky);
                 _livePlanets = new List<PlanetReading>(sky.Planets);
@@ -192,7 +201,7 @@ namespace ProjectorDash
             double height = ActualHeight;
             if (width < 160 || height < 160) return;
 
-            dc.DrawRectangle(Ui.Hex("#04090C"), null, new Rect(0, 0, width, height));
+            dc.DrawRectangle(Ui.SkyBg, null, new Rect(0, 0, width, height));
             Point center = new Point(width / 2.0, height / 2.0);
             double radiusX = width / 2.0 - 20.0;
             double radiusY = height / 2.0 - 20.0;
@@ -217,7 +226,7 @@ namespace ProjectorDash
             {
                 Point point = SkyPoint(center, radiusX, radiusY,
                     star.BearingDegrees, star.AltitudeDegrees);
-                Brush color = Ui.Hex("#61737D");
+                Brush color = Ui.Star;
                 double size = Math.Max(1.2, 2.8 - Math.Max(0.0, star.Magnitude) * 0.55);
                 dc.DrawEllipse(color, null, point, size, size);
                 if (!AircraftNear(point, now, center, radiusX, radiusY))
@@ -230,7 +239,7 @@ namespace ProjectorDash
             {
                 Point point = SkyPoint(center, radiusX, radiusY,
                     planet.BearingDegrees, planet.AltitudeDegrees);
-                Brush color = Ui.Hex("#A99BE8");
+                Brush color = Ui.Planet;
                 dc.DrawEllipse(color, null, point, 2.5, 2.5);
                 DrawPlacedLabel(dc, planet.Name, 11, color,
                     new Point(point.X + 7, point.Y - 7), labels, width, height, false);
@@ -281,7 +290,7 @@ namespace ProjectorDash
             double radiusX, double radiusY, List<Rect> labels,
             double width, double height)
         {
-            Brush color = Ui.Hex("#F4C66A");
+            Brush color = Ui.Sunrise;
             List<Point> points = new List<Point>();
             foreach (SkyTrailSample sample in _issTrail)
                 points.Add(SkyPoint(center, radiusX, radiusY,
@@ -312,7 +321,7 @@ namespace ProjectorDash
                         geometry.LineTo(points[i], true, false);
                 }
                 path.Freeze();
-                dc.DrawGeometry(null, new Pen(Ui.Hex("#806A3D"), 1.4), path);
+                dc.DrawGeometry(null, new Pen(Ui.IssLine, 1.4), path);
             }
             dc.DrawEllipse(null, new Pen(color, 1.5), current, 5.5, 5.5);
             dc.DrawEllipse(color, null, current, 1.8, 1.8);
@@ -332,7 +341,7 @@ namespace ProjectorDash
         private void DrawOrientation(DrawingContext dc, double width, double height,
             List<Rect> labels)
         {
-            Pen corner = new Pen(Ui.Hex("#25434B"), 1.0);
+            Pen corner = new Pen(Ui.MapCorner, 1.0);
             double length = 18.0;
             dc.DrawLine(corner, new Point(16, 16), new Point(16 + length, 16));
             dc.DrawLine(corner, new Point(16, 16), new Point(16, 16 + length));
@@ -370,11 +379,11 @@ namespace ProjectorDash
                 Rect contour = new Rect(center.X - radiusX * scale,
                     center.Y - radiusY * scale,
                     radiusX * scale * 2.0, radiusY * scale * 2.0);
-                Pen pen = new Pen(Ui.Hex("#132A31"), 0.8);
+                Pen pen = new Pen(Ui.MapGrid, 0.8);
                 pen.DashStyle = new DashStyle(new double[] { 1, 9 }, 0);
                 dc.DrawRectangle(null, pen, contour);
                 string text = "EL " + elevation.ToString() + "\u00B0";
-                FormattedText formatted = Format(text, 8, Ui.Hex("#38525A"), false);
+                FormattedText formatted = Format(text, 8, Ui.MapGridText, false);
                 Point position = new Point(center.X + 7, contour.Top + 3);
                 dc.DrawText(formatted, position);
                 labels.Add(new Rect(position.X - 3, position.Y - 2,
@@ -388,7 +397,7 @@ namespace ProjectorDash
             int value = Normalize(bearing);
             string text = AmbientService.Cardinal(value) + "  " + value.ToString() +
                 "\u00B0  /  HORIZON";
-            FormattedText formatted = Format(text, 11, Ui.Hex("#526C74"), true);
+            FormattedText formatted = Format(text, 11, Ui.TextDim, true);
             double x = right ? point.X - formatted.Width : point.X;
             dc.DrawText(formatted, new Point(x, point.Y));
             labels.Add(new Rect(x - 3, point.Y - 2,
@@ -397,7 +406,7 @@ namespace ProjectorDash
 
         private void DrawZenith(DrawingContext dc, Point center)
         {
-            Brush dim = Ui.Hex("#3B555D");
+            Brush dim = Ui.MapGridText;
             Pen pen = new Pen(dim, 1.0);
             dc.DrawEllipse(null, pen, center, 4, 4);
             dc.DrawLine(pen, new Point(center.X - 10, center.Y),
@@ -414,7 +423,7 @@ namespace ProjectorDash
             dc.DrawEllipse(Ui.Accent, null,
                 new Point(center.X - 37, center.Y + 34), pulse, pulse);
             DrawText(dc, "LIVE  " + DateTime.Now.ToString("HH:mm:ss"), 9,
-                Ui.Hex("#78939A"), new Point(center.X - 29, center.Y + 27), false, true);
+                Ui.MapZenith, new Point(center.X - 29, center.Y + 27), false, true);
         }
 
         private void DrawAircraftTrack(DrawingContext dc, AircraftTrack track,
@@ -431,8 +440,8 @@ namespace ProjectorDash
             double east = track.AnchorEastKm + velocityEast * elapsed;
             double north = track.AnchorNorthKm + velocityNorth * elapsed;
             double distanceKm = Math.Sqrt(east * east + north * north);
-            double elevation = Math.Atan2(track.AltitudeKm,
-                Math.Max(distanceKm, 0.05)) * 180.0 / Math.PI;
+            double elevation = AmbientService.AircraftElevationDegrees(distanceKm,
+                track.AltitudeFeet);
             if (elevation < MinimumAircraftElevation) return;
 
             List<Point> observed = new List<Point>();
@@ -445,7 +454,7 @@ namespace ProjectorDash
                 observed[observed.Count - 1].Y, current.X, current.Y) > 1.0)
                 observed.Add(current);
 
-            Pen historyPen = new Pen(Ui.Hex("#317D86"), 1.8);
+            Pen historyPen = new Pen(Ui.AircraftHistory, 1.8);
             if (observed.Count > 1)
             {
                 StreamGeometry history = new StreamGeometry();
@@ -458,7 +467,7 @@ namespace ProjectorDash
                 history.Freeze();
                 dc.DrawGeometry(null, historyPen, history);
                 foreach (Point sample in observed)
-                    dc.DrawEllipse(Ui.Hex("#317D86"), null, sample, 1.5, 1.5);
+                    dc.DrawEllipse(Ui.AircraftHistory, null, sample, 1.5, 1.5);
             }
 
             Point directionPoint = current;
@@ -522,7 +531,7 @@ namespace ProjectorDash
             plane.Freeze();
             dc.PushTransform(new TranslateTransform(point.X, point.Y));
             dc.PushTransform(new RotateTransform(rotation));
-            dc.DrawGeometry(Ui.Accent, new Pen(Ui.Hex("#D5FFFF"), 0.8), plane);
+            dc.DrawGeometry(Ui.Accent, new Pen(Ui.AircraftOutline, 0.8), plane);
             dc.Pop();
             dc.Pop();
         }
@@ -550,7 +559,7 @@ namespace ProjectorDash
                 current.Y + rawY * t1);
             Point end = new Point(current.X + rawX * t2,
                 current.Y + rawY * t2);
-            Pen coursePen = new Pen(Ui.Hex("#1B4851"), 1.1);
+            Pen coursePen = new Pen(Ui.AircraftCourse, 1.1);
             coursePen.DashStyle = new DashStyle(new double[] { 6, 8 }, 0);
             dc.DrawLine(coursePen, start, end);
         }
@@ -577,12 +586,12 @@ namespace ProjectorDash
             Point desired, List<Rect> occupied, double width, double height)
         {
             FormattedText first = Format(title, 12, Ui.Text, true);
-            FormattedText second = Format(detail, 10, Ui.Hex("#779098"), false);
+            FormattedText second = Format(detail, 10, Ui.TextDim, false);
             double boxWidth = Math.Max(first.Width, second.Width) + 12;
             double boxHeight = first.Height + second.Height + 8;
             Rect rect = PlaceRect(new Rect(desired.X, desired.Y, boxWidth, boxHeight),
                 occupied, width, height);
-            dc.DrawRectangle(Ui.Hex("#071116"), new Pen(Ui.Hex("#1C3941"), 1), rect);
+            dc.DrawRectangle(Ui.LabelBg, new Pen(Ui.LabelLine, 1), rect);
             dc.DrawText(first, new Point(rect.X + 6, rect.Y + 3));
             dc.DrawText(second, new Point(rect.X + 6, rect.Y + 3 + first.Height));
             occupied.Add(rect);
@@ -633,8 +642,8 @@ namespace ProjectorDash
 
         private static double ViewingElevation(PlaneReading plane)
         {
-            return Math.Atan2(plane.AltitudeFeet * 0.0003048,
-                Math.Max(plane.DistanceKm, 0.05)) * 180.0 / Math.PI;
+            return AmbientService.AircraftElevationDegrees(plane.DistanceKm,
+                plane.AltitudeFeet);
         }
 
         private Point PositionPoint(Point center, double radiusX, double radiusY,
@@ -643,8 +652,8 @@ namespace ProjectorDash
             double distanceKm = Math.Sqrt(eastKm * eastKm + northKm * northKm);
             double bearing = Math.Atan2(eastKm, northKm) * 180.0 / Math.PI;
             if (bearing < 0) bearing += 360.0;
-            double elevation = Math.Atan2(altitudeKm,
-                Math.Max(distanceKm, 0.05)) * 180.0 / Math.PI;
+            double elevation = AmbientService.AircraftElevationDegrees(distanceKm,
+                altitudeKm / 0.0003048);
             return SkyPoint(center, radiusX, radiusY, bearing, elevation);
         }
 

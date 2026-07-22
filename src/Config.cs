@@ -74,6 +74,12 @@ namespace ProjectorDash
         public int FacingDegrees = 0;
         public bool UseFahrenheit = false;
 
+        // Whole-app color palette and the saved radius used for free ADS-B
+        // point queries. Radius changes are applied explicitly by the UI so
+        // tapping +/- never burns requests while the user is deciding.
+        public string ColorTheme = "Cyan";
+        public int AircraftRadiusKm = 40;
+
         // How launched shortcuts occupy the projector. Fullscreen removes the
         // normal window frame; false keeps the frame and maximizes the window.
         // Field initializer intentionally migrates older config files to the
@@ -184,6 +190,18 @@ namespace ProjectorDash
                     cfg.ClampAlarm();
                     cfg.ClampAutoLock();
                     cfg.ClampLocation();
+                    string theme = Ui.NormalizeTheme(cfg.ColorTheme);
+                    if (theme != cfg.ColorTheme)
+                    {
+                        cfg.ColorTheme = theme;
+                        changed = true;
+                    }
+                    int aircraftRadius = NormalizeAircraftRadius(cfg.AircraftRadiusKm);
+                    if (aircraftRadius != cfg.AircraftRadiusKm)
+                    {
+                        cfg.AircraftRadiusKm = aircraftRadius;
+                        changed = true;
+                    }
                     if (string.IsNullOrEmpty(cfg.BrowserPath))
                     {
                         cfg.BrowserPath = DetectSupermium();
@@ -213,6 +231,8 @@ namespace ProjectorDash
                 ClampAlarm();
                 ClampAutoLock();
                 ClampLocation();
+                ColorTheme = Ui.NormalizeTheme(ColorTheme);
+                AircraftRadiusKm = NormalizeAircraftRadius(AircraftRadiusKm);
                 XmlSerializer ser = new XmlSerializer(typeof(AppConfig));
                 using (FileStream fs = File.Create(ConfigPath()))
                 {
@@ -257,6 +277,13 @@ namespace ProjectorDash
             if (Longitude > 180.0) Longitude = 180.0;
             FacingDegrees %= 360;
             if (FacingDegrees < 0) FacingDegrees += 360;
+        }
+
+        public static int NormalizeAircraftRadius(int value)
+        {
+            if (value < 20) value = 20;
+            if (value > 460) value = 460;
+            return ((value + 10) / 20) * 20;
         }
 
         private static List<ShortcutItem> DefaultShortcuts()

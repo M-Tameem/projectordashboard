@@ -65,10 +65,17 @@ namespace ProjectorDash
         private Button _sleepBtn;
         private Button _autoLockBtn;
         private Button _previewBtn;
+        private Button _colorThemeBtn;
+        private Button _mainOverheadBtn;
+        private Button _aircraftRangeBtn;
+        private Button _overheadRangeBtn;
         private Button _updateBtn;
         private Button _autoLockToggleBtn;
         private Popup _autoLockPopup;
         private Popup _powerPopup;
+        private Popup _aircraftRangePopup;
+        private TextBlock _aircraftRangePendingText;
+        private int _pendingAircraftRadiusKm;
         private TextBox _autoLockTime;
         private bool _suppressSliderEvents;
         private bool _updateBusy;
@@ -276,6 +283,42 @@ namespace ProjectorDash
         // Layout
         // ------------------------------------------------------------------
 
+        private void CycleColorTheme()
+        {
+            _cfg.ColorTheme = Ui.NextTheme(_cfg.ColorTheme);
+            _cfg.Save();
+            Ui.ApplyTheme(_cfg.ColorTheme);
+
+            if (_autoLockPopup != null) _autoLockPopup.IsOpen = false;
+            if (_powerPopup != null) _powerPopup.IsOpen = false;
+            if (_aircraftRangePopup != null) _aircraftRangePopup.IsOpen = false;
+            _previewMirror.Detach();
+            if (_projector != null)
+            {
+                try { _projector.Close(); }
+                catch { }
+                _projector = null;
+            }
+
+            Background = Ui.BgGradient();
+            Content = BuildLayout();
+            ApplyReservedSize();
+            RebuildTiles();
+            SyncAudioUi();
+            SyncBrightnessUi();
+            UpdateAlarmUi();
+            UpdateAutoLockUi();
+            PopulateAmbientEditor();
+            OpenProjectorWindow();
+            if (_projector != null && _projectorOverhead)
+            {
+                _projector.ShowOverhead(true);
+                _projector.UpdateOverhead(_sky, _cfg.FacingDegrees);
+            }
+            ApplyAmbientUi();
+            TickClock();
+        }
+
         private UIElement BuildLayout()
         {
             Grid root = new Grid();
@@ -290,21 +333,21 @@ namespace ProjectorDash
 
             // --- Compact instrument header --------------------------------
             Border headerCard = new Border();
-            headerCard.Margin = new Thickness(22, 14, 22, 6);
-            headerCard.Padding = new Thickness(18, 10, 12, 10);
+            headerCard.Margin = new Thickness(18, 10, 18, 4);
+            headerCard.Padding = new Thickness(16, 8, 10, 8);
             headerCard.Background = Ui.Panel;
             headerCard.BorderBrush = Ui.Line;
             headerCard.BorderThickness = new Thickness(1);
             headerCard.CornerRadius = new CornerRadius(11);
             Grid header = new Grid();
-            header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(225) });
+            header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(205) });
             header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
             StackPanel clockStack = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
             _clockText = new TextBlock();
             _clockText.FontFamily = new FontFamily(Ui.FontLight);
-            _clockText.FontSize = 59;
+            _clockText.FontSize = 54;
             _clockText.Foreground = Ui.Text;
             _clockText.Margin = new Thickness(0, -8, 0, 0);
             clockStack.Children.Add(_clockText);
@@ -331,10 +374,10 @@ namespace ProjectorDash
             _weatherMetaText = Ui.Label("Settings › Ambient", 13, Ui.TextDim);
             _weatherMetaText.TextTrimming = TextTrimming.CharacterEllipsis;
             weatherCopy.Children.Add(_weatherMetaText);
-            _sunriseText = Ui.Label("NEXT SUNRISE  --", 11, Ui.Hex("#F4C66A"));
+            _sunriseText = Ui.Label("NEXT SUNRISE  --", 11, Ui.Sunrise);
             _sunriseText.Margin = new Thickness(0, 2, 0, 0);
             weatherCopy.Children.Add(_sunriseText);
-            TextBlock source = Ui.Label("OPEN-METEO", 10, Ui.Hex("#4D6971"));
+            TextBlock source = Ui.Label("OPEN-METEO", 10, Ui.SourceDim);
             source.Margin = new Thickness(0, 3, 0, 0);
             weatherCopy.Children.Add(source);
             Grid.SetColumn(weatherCopy, 1);
@@ -363,6 +406,12 @@ namespace ProjectorDash
                 ? "Preview is available when the projector is the active target."
                 : "Show a live copy of the current projector window without opening another tab.";
             actions.Children.Add(_previewBtn);
+
+            _colorThemeBtn = Ui.HeaderBtn("Color " + Ui.ThemeName,
+                delegate { CycleColorTheme(); });
+            _colorThemeBtn.MinWidth = 100;
+            _colorThemeBtn.ToolTip = "Change the palette across the tablet, projector idle screen, and sky map.";
+            actions.Children.Add(_colorThemeBtn);
 
             Button tools = Ui.HeaderBtn("Tools", delegate { OpenAutoLockPopup(); });
             tools.ToolTip = "Keyboard, Windows desktop, and daily auto-lock.";
@@ -400,7 +449,7 @@ namespace ProjectorDash
             scroller.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
             scroller.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
             scroller.PanningMode = PanningMode.VerticalOnly;
-            scroller.Margin = new Thickness(21, 3, 21, 4);
+            scroller.Margin = new Thickness(17, 1, 17, 2);
 
             _tilePanel = new WrapPanel();
             _tilePanel.Orientation = Orientation.Horizontal;
@@ -457,7 +506,7 @@ namespace ProjectorDash
             outline.RadiusY = 14;
             reserved.Children.Add(outline);
 
-            TextBlock reservedLabel = Ui.Label("touch pad", 14, Ui.Hex("#3E5961"));
+            TextBlock reservedLabel = Ui.Label("touch pad", 14, Ui.ReservedDim);
             reservedLabel.HorizontalAlignment = HorizontalAlignment.Center;
             reservedLabel.VerticalAlignment = VerticalAlignment.Center;
             reserved.Children.Add(reservedLabel);
@@ -489,23 +538,21 @@ namespace ProjectorDash
         private Border BuildSkyStrip()
         {
             Border card = new Border();
-            card.Margin = new Thickness(22, 2, 22, 4);
-            card.Padding = new Thickness(16, 9, 16, 9);
-            card.Background = Ui.Hex("#091218");
+            card.Margin = new Thickness(18, 1, 18, 3);
+            card.Padding = new Thickness(14, 7, 14, 7);
+            card.Background = Ui.SurfaceLow;
             card.BorderBrush = Ui.Line;
             card.BorderThickness = new Thickness(1);
             card.CornerRadius = new CornerRadius(9);
-            card.Cursor = System.Windows.Input.Cursors.Hand;
-            card.ToolTip = "Open the live through-the-ceiling sky map.";
-            card.MouseLeftButtonUp += delegate { OpenOverheadView(); };
 
             Grid grid = new Grid();
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(150) });
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(138) });
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
             StackPanel status = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
-            TextBlock mark = Ui.Label("OVERHEAD  /  OPEN MAP", 11, Ui.Accent);
+            TextBlock mark = Ui.Label("OVERHEAD  /  LIVE", 11, Ui.Accent);
             mark.FontWeight = FontWeights.SemiBold;
             status.Children.Add(mark);
             _skyCountText = Ui.Label("SET LOCATION", 15, Ui.Text);
@@ -518,7 +565,7 @@ namespace ProjectorDash
                 Margin = new Thickness(14, 0, 16, 0),
                 VerticalAlignment = VerticalAlignment.Center
             };
-            _aircraftSourceText = Ui.Label("AIR TRAFFIC  /  CONNECTING", 10, Ui.Hex("#4D6971"));
+            _aircraftSourceText = Ui.Label("AIR TRAFFIC  /  CONNECTING", 10, Ui.SourceDim);
             traffic.Children.Add(_aircraftSourceText);
             _aircraftText = Ui.Label("Location is not configured", 14, Ui.TextDim);
             _aircraftText.TextTrimming = TextTrimming.CharacterEllipsis;
@@ -531,19 +578,45 @@ namespace ProjectorDash
                 Margin = new Thickness(16, 0, 0, 0),
                 VerticalAlignment = VerticalAlignment.Center
             };
-            orbit.Children.Add(Ui.Label("ORBIT + NIGHT SKY  /  LOCAL CALC", 10, Ui.Hex("#4D6971")));
+            orbit.Children.Add(Ui.Label("ORBIT + NIGHT SKY  /  LOCAL CALC", 10, Ui.SourceDim));
             _orbitText = Ui.Label("ISS, planets, and major stars appear here", 14, Ui.TextDim);
             _orbitText.TextTrimming = TextTrimming.CharacterEllipsis;
             orbit.Children.Add(_orbitText);
             Grid.SetColumn(orbit, 2);
             grid.Children.Add(orbit);
+
+            StackPanel actions = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(12, 0, 0, 0)
+            };
+            _aircraftRangeBtn = Ui.Btn("RANGE " + _cfg.AircraftRadiusKm.ToString() + " KM",
+                12, Ui.PanelHi, Ui.Text,
+                delegate { OpenAircraftRangePopup(_aircraftRangeBtn); });
+            _aircraftRangeBtn.Height = 46;
+            _aircraftRangeBtn.MinHeight = 46;
+            _aircraftRangeBtn.Padding = new Thickness(12, 6, 12, 6);
+            _aircraftRangeBtn.Margin = new Thickness(0, 0, 8, 0);
+            actions.Children.Add(_aircraftRangeBtn);
+            _mainOverheadBtn = Ui.Btn("PROJECT SKY", 13, Ui.Accent, Ui.Ink,
+                delegate { ToggleOverheadFromMain(); });
+            _mainOverheadBtn.Height = 46;
+            _mainOverheadBtn.MinHeight = 46;
+            _mainOverheadBtn.Padding = new Thickness(14, 6, 14, 6);
+            _mainOverheadBtn.ToolTip = "Send the ceiling sky directly to the projector; use the tablet map when no projector is available.";
+            actions.Children.Add(_mainOverheadBtn);
+            Grid.SetColumn(actions, 3);
+            grid.Children.Add(actions);
+
+            _aircraftRangePopup = BuildAircraftRangePopup(_aircraftRangeBtn);
             card.Child = grid;
             return card;
         }
 
         private Grid BuildOverheadOverlay()
         {
-            Grid overlay = new Grid { Background = Ui.Hex("#050B0F") };
+            Grid overlay = new Grid { Background = Ui.SkyBg };
             Grid inner = new Grid { Margin = new Thickness(22, 12, 22, 8) };
             inner.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             inner.RowDefinitions.Add(new RowDefinition
@@ -569,12 +642,15 @@ namespace ProjectorDash
                 _nextSkyRefreshUtc = DateTime.MinValue;
                 RefreshSky();
             }));
+            _overheadRangeBtn = SmallBtn("Range: " + _cfg.AircraftRadiusKm.ToString() + " km",
+                delegate { OpenAircraftRangePopup(_overheadRangeBtn); });
+            actions.Children.Add(_overheadRangeBtn);
             _ceilingMapBtn = SmallBtn("Show on projector", delegate { ToggleProjectorOverhead(); });
             _ceilingMapBtn.Background = Ui.AccentDim;
             _ceilingMapBtn.BorderBrush = Ui.Accent;
             _ceilingMapBtn.IsEnabled = !_cfg.TabletOnlyMode;
             actions.Children.Add(_ceilingMapBtn);
-            Button back = Ui.Btn("Back", 16, Ui.Accent, Ui.Hex("#041014"),
+            Button back = Ui.Btn("Back", 16, Ui.Accent, Ui.Ink,
                 delegate { CloseOverheadView(); });
             actions.Children.Add(back);
             Grid.SetColumn(actions, 1);
@@ -586,7 +662,7 @@ namespace ProjectorDash
                 { Width = new GridLength(1, GridUnitType.Star) });
             body.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(300) });
             Border mapFrame = new Border();
-            mapFrame.Background = Ui.Hex("#050B0F");
+            mapFrame.Background = Ui.SkyBg;
             mapFrame.BorderBrush = Ui.Line;
             mapFrame.BorderThickness = new Thickness(1);
             mapFrame.CornerRadius = new CornerRadius(10);
@@ -622,7 +698,7 @@ namespace ProjectorDash
             _overheadObjectsText.TextWrapping = TextWrapping.Wrap;
             infoStack.Children.Add(_overheadObjectsText);
             TextBlock key = Ui.Label(
-                "CYAN  live aircraft + observed path\nAMBER  ISS + observed pass\nVIOLET  planets\nGREY  major stars\n\nEL 25° / 50° / 75° contours show elevation above the horizon; km labels show physical range. Center is zenith (90°), all edges are horizon (0°), and bearing wraps 360° around center. Aircraft are live within 40 km. Dashed lines are reported courses; solid segments are observed movement.",
+                "ACCENT  live aircraft + observed path\nAMBER  ISS + observed pass\nVIOLET  planets\nGREY  major stars\n\nEL 25° / 50° / 75° contours show elevation above the horizon; km labels show physical range. Center is zenith (90°), all edges are horizon (0°), and bearing wraps 360° around center. Aircraft use the saved range shown above. Dashed lines are reported courses; solid segments are observed movement.",
                 12, Ui.TextDim);
             key.Margin = new Thickness(0, 18, 0, 0);
             key.TextWrapping = TextWrapping.Wrap;
@@ -639,6 +715,111 @@ namespace ProjectorDash
             inner.Children.Add(body);
             overlay.Children.Add(inner);
             return overlay;
+        }
+
+        private Popup BuildAircraftRangePopup(Button target)
+        {
+            Popup popup = new Popup();
+            popup.PlacementTarget = target;
+            popup.Placement = PlacementMode.Bottom;
+            popup.HorizontalOffset = -120;
+            popup.StaysOpen = false;
+            popup.AllowsTransparency = true;
+
+            Border card = new Border();
+            card.Width = 330;
+            card.Padding = new Thickness(16);
+            card.Background = Ui.PanelHi;
+            card.BorderBrush = Ui.Accent;
+            card.BorderThickness = new Thickness(1);
+            card.CornerRadius = new CornerRadius(11);
+            StackPanel panel = new StackPanel();
+            TextBlock title = Ui.Label("AIRCRAFT SEARCH RANGE", 13, Ui.Accent);
+            title.FontWeight = FontWeights.SemiBold;
+            panel.Children.Add(title);
+            TextBlock note = Ui.Label(
+                "Choose in 20 km steps. No feed request is made until Done.",
+                13, Ui.TextDim);
+            note.TextWrapping = TextWrapping.Wrap;
+            note.Margin = new Thickness(0, 4, 0, 12);
+            panel.Children.Add(note);
+
+            Grid selector = new Grid();
+            selector.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            selector.ColumnDefinitions.Add(new ColumnDefinition
+                { Width = new GridLength(1, GridUnitType.Star) });
+            selector.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            Button minus = Ui.Btn("−", 24, Ui.Panel, Ui.Text,
+                delegate { ChangePendingAircraftRange(-20); });
+            minus.Width = 62;
+            selector.Children.Add(minus);
+            _aircraftRangePendingText = Ui.Label("40 km", 24, Ui.Text);
+            _aircraftRangePendingText.FontFamily = new FontFamily(Ui.FontLight);
+            _aircraftRangePendingText.TextAlignment = TextAlignment.Center;
+            _aircraftRangePendingText.VerticalAlignment = VerticalAlignment.Center;
+            Grid.SetColumn(_aircraftRangePendingText, 1);
+            selector.Children.Add(_aircraftRangePendingText);
+            Button plus = Ui.Btn("+", 24, Ui.Panel, Ui.Text,
+                delegate { ChangePendingAircraftRange(20); });
+            plus.Width = 62;
+            Grid.SetColumn(plus, 2);
+            selector.Children.Add(plus);
+            panel.Children.Add(selector);
+
+            Button done = Ui.Btn("Done · apply + refresh once", 15,
+                Ui.Accent, Ui.Ink, delegate { ApplyPendingAircraftRange(); });
+            done.Margin = new Thickness(0, 10, 0, 0);
+            panel.Children.Add(done);
+            card.Child = panel;
+            popup.Child = card;
+            return popup;
+        }
+
+        private void OpenAircraftRangePopup(Button target)
+        {
+            if (_aircraftRangePopup == null || target == null) return;
+            _pendingAircraftRadiusKm = _cfg.AircraftRadiusKm;
+            _aircraftRangePopup.PlacementTarget = target;
+            UpdatePendingAircraftRange();
+            _aircraftRangePopup.IsOpen = true;
+        }
+
+        private void ChangePendingAircraftRange(int deltaKm)
+        {
+            _pendingAircraftRadiusKm = AppConfig.NormalizeAircraftRadius(
+                _pendingAircraftRadiusKm + deltaKm);
+            UpdatePendingAircraftRange();
+        }
+
+        private void UpdatePendingAircraftRange()
+        {
+            if (_aircraftRangePendingText != null)
+                _aircraftRangePendingText.Text = _pendingAircraftRadiusKm.ToString() + " km" +
+                    (_pendingAircraftRadiusKm >= 460 ? " · MAX" : "");
+        }
+
+        private void ApplyPendingAircraftRange()
+        {
+            int selected = AppConfig.NormalizeAircraftRadius(_pendingAircraftRadiusKm);
+            if (_aircraftRangePopup != null) _aircraftRangePopup.IsOpen = false;
+            if (selected == _cfg.AircraftRadiusKm) return;
+            _cfg.AircraftRadiusKm = selected;
+            _cfg.Save();
+            UpdateAircraftRangeUi();
+            _sky = null;
+            ApplyAmbientUi();
+            _nextSkyRefreshUtc = DateTime.MinValue;
+            RefreshSky();
+        }
+
+        private void UpdateAircraftRangeUi()
+        {
+            if (_aircraftRangeBtn != null)
+                _aircraftRangeBtn.Content = "RANGE " +
+                    _cfg.AircraftRadiusKm.ToString() + " KM";
+            if (_overheadRangeBtn != null)
+                _overheadRangeBtn.Content = "Range: " +
+                    _cfg.AircraftRadiusKm.ToString() + " km";
         }
 
         private Popup BuildPowerPopup(Button target)
@@ -684,7 +865,7 @@ namespace ProjectorDash
                 : "Requires a CEC-capable HDMI output or USB-CEC adapter and free libCEC client.";
             panel.Children.Add(cec);
             Button secure = Ui.Btn("Lock tablet + emergency off", 15,
-                Ui.Hex("#461721"), Ui.Hex("#FFF4F5"),
+                Ui.DangerFill, Ui.DangerText,
                 delegate { popup.IsOpen = false; EmergencyOff(); });
             secure.BorderBrush = Ui.Danger;
             secure.Margin = new Thickness(0, 8, 0, 0);
@@ -746,7 +927,7 @@ namespace ProjectorDash
             _autoLockTime = Ui.Input("1:00 AM", 17);
             _autoLockTime.Width = 130;
             row.Children.Add(_autoLockTime);
-            Button save = Ui.Btn("Save", 16, Ui.Accent, Ui.Hex("#041014"),
+            Button save = Ui.Btn("Save", 16, Ui.Accent, Ui.Ink,
                 delegate { SaveAutoLockTime(); });
             save.Margin = new Thickness(10, 0, 0, 0);
             row.Children.Add(save);
@@ -763,7 +944,7 @@ namespace ProjectorDash
 
         private Grid BuildPreviewOverlay()
         {
-            Grid overlay = new Grid { Background = Ui.Hex("#071015") };
+            Grid overlay = new Grid { Background = Ui.Overlay };
             Grid inner = new Grid { Margin = new Thickness(24, 12, 24, 10) };
             inner.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             inner.RowDefinitions.Add(new RowDefinition
@@ -790,7 +971,7 @@ namespace ProjectorDash
             fullscreen.Background = Ui.AccentDim;
             fullscreen.BorderBrush = Ui.Accent;
             actions.Children.Add(fullscreen);
-            Button back = Ui.Btn("Back", 17, Ui.Accent, Ui.Hex("#041014"),
+            Button back = Ui.Btn("Back", 17, Ui.Accent, Ui.Ink,
                 delegate { ClosePreview(); });
             actions.Children.Add(back);
             Grid.SetColumn(actions, 1);
@@ -966,7 +1147,7 @@ namespace ProjectorDash
             }
 
             Button add = Ui.Tile("+", "add shortcut", delegate { OpenSettings(); });
-            add.Background = Ui.Hex("#08171D");
+            add.Background = Ui.SurfaceLow;
             add.BorderBrush = Ui.Line;
             _tilePanel.Children.Add(add);
         }
@@ -1138,6 +1319,21 @@ namespace ProjectorDash
             RefreshSky();
         }
 
+        private void ToggleOverheadFromMain()
+        {
+            if (!_cfg.LocationConfigured)
+            {
+                OpenOverheadView();
+                return;
+            }
+            if (_cfg.TabletOnlyMode || _projector == null)
+            {
+                OpenOverheadView();
+                return;
+            }
+            ToggleProjectorOverhead();
+        }
+
         private void CloseOverheadView()
         {
             if (_overheadOverlay != null)
@@ -1177,6 +1373,7 @@ namespace ProjectorDash
         private void UpdateOverheadUi()
         {
             if (_overheadMap == null) return;
+            UpdateAircraftRangeUi();
             _overheadMap.SetData(_sky, _cfg.FacingDegrees);
             if (_projector != null && _projectorOverhead)
                 _projector.UpdateOverhead(_sky, _cfg.FacingDegrees);
@@ -1185,7 +1382,18 @@ namespace ProjectorDash
                 _ceilingMapBtn.Content = _projectorOverhead
                     ? "Ceiling map: On" : "Show on projector";
                 _ceilingMapBtn.Background = _projectorOverhead ? Ui.Accent : Ui.AccentDim;
-                _ceilingMapBtn.Foreground = _projectorOverhead ? Ui.Hex("#041014") : Ui.Accent;
+                _ceilingMapBtn.Foreground = _projectorOverhead ? Ui.Ink : Ui.Accent;
+            }
+            if (_mainOverheadBtn != null)
+            {
+                bool canProject = !_cfg.TabletOnlyMode && _projector != null;
+                _mainOverheadBtn.Content = canProject
+                    ? (_projectorOverhead ? "SKY ON · STOP" : "PROJECT SKY")
+                    : "VIEW SKY";
+                _mainOverheadBtn.Background = _projectorOverhead
+                    ? Ui.AccentDim : Ui.Accent;
+                _mainOverheadBtn.Foreground = _projectorOverhead
+                    ? Ui.Accent : Ui.Ink;
             }
             if (!_cfg.LocationConfigured)
             {
@@ -1204,7 +1412,8 @@ namespace ProjectorDash
 
             _overheadFeedText.Text = _sky.AircraftFeedAvailable
                 ? (OverheadAircraftCount().ToString() + " overhead · " +
-                    _sky.Planes.Count.ToString() + " within 40 km · " +
+                    _sky.Planes.Count.ToString() + " within " +
+                    _cfg.AircraftRadiusKm.ToString() + " km · " +
                     (_sky.AircraftFeedName.Length == 0 ? "live ADS-B" : _sky.AircraftFeedName))
                 : ("Aircraft feeds offline\n" + _sky.AircraftError);
             _overheadFeedText.Foreground = _sky.AircraftFeedAvailable ? Ui.Text : Ui.Danger;
@@ -1217,9 +1426,9 @@ namespace ProjectorDash
                 planeDetails < 6; planeIndex++)
             {
                 PlaneReading plane = _sky.Planes[planeIndex];
-                double elevation = Math.Atan2(plane.AltitudeFeet * 0.0003048,
-                    Math.Max(plane.DistanceKm, 0.05)) * 180.0 / Math.PI;
-                if (elevation < 5.0) continue;
+                double elevation = AmbientService.AircraftElevationDegrees(
+                    plane.DistanceKm, plane.AltitudeFeet);
+                if (elevation < AircraftMinimumElevation()) continue;
                 planeDetails++;
                 string identity = plane.Label;
                 if (!string.IsNullOrWhiteSpace(plane.AircraftType))
@@ -1283,11 +1492,16 @@ namespace ProjectorDash
             int count = 0;
             foreach (PlaneReading plane in _sky.Planes)
             {
-                double elevation = Math.Atan2(plane.AltitudeFeet * 0.0003048,
-                    Math.Max(plane.DistanceKm, 0.05)) * 180.0 / Math.PI;
-                if (elevation >= 5.0) count++;
+                double elevation = AmbientService.AircraftElevationDegrees(
+                    plane.DistanceKm, plane.AltitudeFeet);
+                if (elevation >= AircraftMinimumElevation()) count++;
             }
             return count;
+        }
+
+        private double AircraftMinimumElevation()
+        {
+            return _cfg.AircraftRadiusKm > 40 ? 0.5 : 5.0;
         }
 
         private void OpenPreview()
@@ -1812,7 +2026,7 @@ namespace ProjectorDash
         private Grid BuildSettingsOverlay()
         {
             Grid overlay = new Grid();
-            overlay.Background = Ui.Hex("#071015");
+            overlay.Background = Ui.Overlay;
 
             Grid inner = new Grid();
             inner.Margin = new Thickness(24, 12, 24, 8);
@@ -1826,7 +2040,7 @@ namespace ProjectorDash
             TextBlock title = Ui.Label("Settings", 29, Ui.Text);
             title.FontWeight = FontWeights.SemiBold;
             titleRow.Children.Add(title);
-            Button done = Ui.Btn("Done", 17, Ui.Accent, Ui.Hex("#041014"),
+            Button done = Ui.Btn("Done", 17, Ui.Accent, Ui.Ink,
                 delegate { CloseSettings(); });
             Grid.SetColumn(done, 1);
             titleRow.Children.Add(done);
@@ -1935,7 +2149,7 @@ namespace ProjectorDash
             editButtons.Children.Add(SmallBtn("Browse app", delegate { BrowseForProgram(); }));
             Button save = SmallBtn("Save shortcut", delegate { SaveEditedShortcut(); });
             save.Background = Ui.Accent;
-            save.Foreground = Ui.Hex("#041014");
+            save.Foreground = Ui.Ink;
             editButtons.Children.Add(save);
             editor.Children.Add(editButtons);
             Grid.SetColumn(editor, 2);
@@ -2180,14 +2394,14 @@ namespace ProjectorDash
             // The stock Windows ComboBox chrome paints its closed face white on
             // some tablet themes, so use an explicit dark foreground here.
             combo.Background = Brushes.White;
-            combo.Foreground = Ui.Hex("#17131F");
+            combo.Foreground = Ui.ComboText;
             combo.BorderBrush = Ui.Line;
             combo.Padding = new Thickness(10, 6, 10, 6);
             Style items = new Style(typeof(ComboBoxItem));
             items.Setters.Add(new Setter(ComboBoxItem.MinHeightProperty, 46.0));
             items.Setters.Add(new Setter(ComboBoxItem.PaddingProperty, new Thickness(10, 7, 10, 7)));
             items.Setters.Add(new Setter(ComboBoxItem.BackgroundProperty, Brushes.White));
-            items.Setters.Add(new Setter(ComboBoxItem.ForegroundProperty, Ui.Hex("#17131F")));
+            items.Setters.Add(new Setter(ComboBoxItem.ForegroundProperty, Ui.ComboText));
             combo.ItemContainerStyle = items;
             return combo;
         }
@@ -2393,11 +2607,17 @@ namespace ProjectorDash
             if (!_cfg.LocationConfigured || _skyRefreshBusy) return;
             _skyRefreshBusy = true;
             _nextSkyRefreshUtc = DateTime.UtcNow.AddSeconds(SkyRefreshSeconds());
-            AmbientService.GetSkyAsync(_cfg.Latitude, _cfg.Longitude).ContinueWith(
+            int requestedRadiusKm = _cfg.AircraftRadiusKm;
+            AmbientService.GetSkyAsync(_cfg.Latitude, _cfg.Longitude,
+                requestedRadiusKm).ContinueWith(
                 delegate(Task<SkyReading> task)
                 {
                     _skyRefreshBusy = false;
-                    if (!task.IsCanceled && !task.IsFaulted) _sky = task.Result;
+                    if (!task.IsCanceled && !task.IsFaulted &&
+                        task.Result.AircraftRadiusKm == _cfg.AircraftRadiusKm)
+                        _sky = task.Result;
+                    else if (!task.IsCanceled && !task.IsFaulted)
+                        _nextSkyRefreshUtc = DateTime.MinValue;
                     ApplyAmbientUi();
                 }, TaskScheduler.FromCurrentSynchronizationContext());
         }
@@ -2488,7 +2708,9 @@ namespace ProjectorDash
                         " km " + AmbientService.Direction(plane.BearingDegrees, _cfg.FacingDegrees) +
                         " · " + plane.AltitudeFeet.ToString("N0") + " ft");
                 }
-                _aircraftText.Text = traffic.Count == 0 ? "No aircraft within 40 km" :
+                _aircraftText.Text = traffic.Count == 0
+                    ? "No aircraft within " + _cfg.AircraftRadiusKm.ToString() + " km"
+                    :
                     string.Join("   |   ", traffic.ToArray());
             }
 
@@ -2631,7 +2853,7 @@ namespace ProjectorDash
         private Grid BuildAlarmOverlay()
         {
             Grid overlay = new Grid();
-            overlay.Background = Ui.Hex("#E60B0810");
+            overlay.Background = Ui.AlarmShade;
 
             StackPanel panel = new StackPanel();
             panel.HorizontalAlignment = HorizontalAlignment.Center;
@@ -2662,8 +2884,8 @@ namespace ProjectorDash
                 delegate { SnoozeAlarm(); });
             snooze.Margin = new Thickness(0, 0, 16, 0);
             buttons.Children.Add(snooze);
-            Button dismiss = Ui.Btn("Dismiss", 21, Ui.Hex("#6B1727"),
-                Ui.Hex("#FFF4F5"), delegate { DismissAlarm(); });
+            Button dismiss = Ui.Btn("Dismiss", 21, Ui.DangerFill,
+                Ui.DangerText, delegate { DismissAlarm(); });
             dismiss.BorderBrush = Ui.Danger;
             buttons.Children.Add(dismiss);
             panel.Children.Add(buttons);

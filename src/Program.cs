@@ -42,6 +42,7 @@ namespace ProjectorDash
                 app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
 
                 AppConfig cfg = AppConfig.Load();
+                Ui.ApplyTheme(cfg.ColorTheme);
 
                 // First run (or a saved display no longer exists): ask which screen is which.
                 if (!cfg.DisplaysConfigured())

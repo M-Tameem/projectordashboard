@@ -24,11 +24,11 @@ namespace ProjectorDash
             ShowInTaskbar = false;
             ShowActivated = false;
             Topmost = true;
-            Background = Ui.Hex("#EB0C0A14");
+            Background = Ui.ReturnShade;
 
             Border card = new Border();
             card.Padding = new Thickness(7);
-            card.Background = Ui.Hex("#EB0C0A14");
+            card.Background = Ui.ReturnShade;
             card.BorderBrush = Ui.Accent;
             card.BorderThickness = new Thickness(1);
             card.CornerRadius = new CornerRadius(12);
@@ -45,7 +45,7 @@ namespace ProjectorDash
             dashboard.Margin = new Thickness(0, 0, 7, 0);
             buttons.Children.Add(dashboard);
 
-            Button off = Ui.Btn("OFF", 16, Ui.Hex("#761527"), Ui.Hex("#FFF4F5"),
+            Button off = Ui.Btn("OFF", 16, Ui.DangerFill, Ui.DangerText,
                 delegate { if (emergencyOff != null) emergencyOff(); });
             off.MinHeight = 56;
             off.BorderBrush = Ui.Danger;

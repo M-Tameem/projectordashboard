@@ -98,6 +98,7 @@ namespace ProjectorDash
         public string AircraftError = "";
         public double ObserverLatitude;
         public double ObserverLongitude;
+        public int AircraftRadiusKm = 40;
     }
 
     /// <summary>
@@ -112,6 +113,9 @@ namespace ProjectorDash
         private static readonly object FallbackSync = new object();
         private static DateTime _fallbackFetchedUtc = DateTime.MinValue;
         private static List<PlaneReading> _fallbackPlanes;
+        private static double _fallbackLatitude;
+        private static double _fallbackLongitude;
+        private static int _fallbackRadiusKm;
 
         public static async Task<AmbientLocation> FindLocationAsync(string search)
         {
@@ -172,13 +176,22 @@ namespace ProjectorDash
 
         public static async Task<SkyReading> GetSkyAsync(double latitude, double longitude)
         {
+            return await GetSkyAsync(latitude, longitude, 40);
+        }
+
+        public static async Task<SkyReading> GetSkyAsync(double latitude, double longitude,
+            int aircraftRadiusKm)
+        {
+            aircraftRadiusKm = AppConfig.NormalizeAircraftRadius(aircraftRadiusKm);
             SkyReading result = new SkyReading();
             result.ObserverLatitude = latitude;
             result.ObserverLongitude = longitude;
+            result.AircraftRadiusKm = aircraftRadiusKm;
             result.Planets.AddRange(CalculatePlanets(DateTime.UtcNow, latitude, longitude));
             result.Stars.AddRange(CalculateStars(DateTime.UtcNow, latitude, longitude));
 
-            Task<PlaneFeedResult> planes = GetPlanesAsync(latitude, longitude);
+            Task<PlaneFeedResult> planes = GetPlanesAsync(latitude, longitude,
+                aircraftRadiusKm);
             Task<IssReading> iss = GetIssAsync(latitude, longitude);
             try
             {
@@ -213,23 +226,27 @@ namespace ProjectorDash
         }
 
         private static async Task<PlaneFeedResult> GetPlanesAsync(
-            double latitude, double longitude)
+            double latitude, double longitude, int radiusKm)
         {
             string lat = latitude.ToString("0.#####", CultureInfo.InvariantCulture);
             string lon = longitude.ToString("0.#####", CultureInfo.InvariantCulture);
-            string suffix = "/v2/point/" + lat + "/" + lon + "/25";
+            int radiusNauticalMiles = Math.Max(1, Math.Min(250,
+                (int)Math.Ceiling(radiusKm / 1.852)));
+            string suffix = "/v2/point/" + lat + "/" + lon + "/" +
+                radiusNauticalMiles.ToString(CultureInfo.InvariantCulture);
             Exception primaryError;
             try
             {
                 PlaneFeedResult primary = new PlaneFeedResult();
                 primary.Name = "adsb.lol";
                 primary.Planes = await GetPlanesFromAsync(
-                    "https://api.adsb.lol" + suffix, latitude, longitude);
+                    "https://api.adsb.lol" + suffix, latitude, longitude, radiusKm);
                 return primary;
             }
             catch (Exception ex) { primaryError = ex; }
 
-            List<PlaneReading> cached = GetCachedFallbackPlanes();
+            List<PlaneReading> cached = GetCachedFallbackPlanes(latitude, longitude,
+                radiusKm);
             if (cached != null)
             {
                 return new PlaneFeedResult
@@ -244,8 +261,8 @@ namespace ProjectorDash
                 PlaneFeedResult fallback = new PlaneFeedResult();
                 fallback.Name = "airplanes.live fallback · quota-safe 3 min sync";
                 fallback.Planes = await GetPlanesFromAsync(
-                    "https://api.airplanes.live" + suffix, latitude, longitude);
-                StoreFallbackPlanes(fallback.Planes);
+                    "https://api.airplanes.live" + suffix, latitude, longitude, radiusKm);
+                StoreFallbackPlanes(fallback.Planes, latitude, longitude, radiusKm);
                 return fallback;
             }
             catch (Exception fallbackError)
@@ -256,22 +273,30 @@ namespace ProjectorDash
             }
         }
 
-        private static List<PlaneReading> GetCachedFallbackPlanes()
+        private static List<PlaneReading> GetCachedFallbackPlanes(double latitude,
+            double longitude, int radiusKm)
         {
             lock (FallbackSync)
             {
                 if (_fallbackPlanes == null) return null;
+                if (Math.Abs(_fallbackLatitude - latitude) > 0.000001 ||
+                    Math.Abs(_fallbackLongitude - longitude) > 0.000001 ||
+                    _fallbackRadiusKm != radiusKm) return null;
                 double age = (DateTime.UtcNow - _fallbackFetchedUtc).TotalSeconds;
                 if (age < 0.0 || age >= 180.0) return null;
                 return ClonePlanes(_fallbackPlanes, age);
             }
         }
 
-        private static void StoreFallbackPlanes(List<PlaneReading> planes)
+        private static void StoreFallbackPlanes(List<PlaneReading> planes,
+            double latitude, double longitude, int radiusKm)
         {
             lock (FallbackSync)
             {
                 _fallbackFetchedUtc = DateTime.UtcNow;
+                _fallbackLatitude = latitude;
+                _fallbackLongitude = longitude;
+                _fallbackRadiusKm = radiusKm;
                 _fallbackPlanes = ClonePlanes(planes, 0.0);
             }
         }
@@ -302,7 +327,7 @@ namespace ProjectorDash
         }
 
         private static async Task<List<PlaneReading>> GetPlanesFromAsync(
-            string url, double latitude, double longitude)
+            string url, double latitude, double longitude, int radiusKm)
         {
             Dictionary<string, object> root = AsObject(await DownloadAsync(url));
             object raw;
@@ -318,7 +343,7 @@ namespace ProjectorDash
                 double planeLat = NumberValue(item, "lat");
                 double planeLon = NumberValue(item, "lon");
                 double distance = HaversineKm(latitude, longitude, planeLat, planeLon);
-                if (distance > 40.0) continue;
+                if (distance > radiusKm) continue;
 
                 object altitudeRaw;
                 if (!item.TryGetValue("alt_baro", out altitudeRaw) || altitudeRaw == null) continue;
@@ -465,6 +490,18 @@ namespace ProjectorDash
         public static string Direction(double bearing, int facingDegrees)
         {
             return Cardinal(bearing) + " · " + RelativeDirection(bearing, facingDegrees);
+        }
+
+        public static double AircraftElevationDegrees(double groundDistanceKm,
+            double altitudeFeet)
+        {
+            double distance = Math.Max(0.0, groundDistanceKm);
+            double altitudeKm = Math.Max(0.0, altitudeFeet) * 0.0003048;
+            double centralAngle = distance / EarthRadiusKm;
+            double targetRadius = EarthRadiusKm + altitudeKm;
+            double up = targetRadius * Math.Cos(centralAngle) - EarthRadiusKm;
+            double horizontal = targetRadius * Math.Sin(centralAngle);
+            return Math.Atan2(up, Math.Max(horizontal, 0.00005)) / Deg;
         }
 
         // JPL approximate Keplerian elements and rates, valid 1800-2050.
