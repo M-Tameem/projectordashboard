@@ -65,8 +65,8 @@ namespace ProjectorDash
         // One-time manual location for weather and the overhead display. We
         // deliberately do not use Windows Location Services: it is unreliable
         // on the target Windows 8.1 tablet and would add another permission/
-        // hardware dependency. FacingDegrees is true-north clockwise and lets
-        // bearings also be described relative to the view from bed.
+        // hardware dependency. FacingDegrees is the true-north-clockwise
+        // heading toward the physical top edge of the projected image.
         public bool LocationConfigured = false;
         public string LocationName = "";
         public double Latitude = 0.0;

@@ -75,9 +75,19 @@ namespace ProjectorDash
         private TextBlock _weatherTempText;
         private TextBlock _weatherConditionText;
         private TextBlock _weatherMetaText;
+        private TextBlock _sunriseText;
         private TextBlock _skyCountText;
+        private TextBlock _aircraftSourceText;
         private TextBlock _aircraftText;
         private TextBlock _orbitText;
+        private Grid _overheadOverlay;
+        private OverheadMap _overheadMap;
+        private TextBlock _overheadFeedText;
+        private TextBlock _overheadObjectsText;
+        private TextBlock _overheadUpdatedText;
+        private Button _ceilingMapBtn;
+        private bool _projectorOverhead;
+        private bool _overheadRestoresApp;
 
         // Live projector preview overlay
         private Grid _previewOverlay;
@@ -235,6 +245,7 @@ namespace ProjectorDash
             DateTime now = DateTime.Now;
             _clockText.Text = now.ToString("h:mm");
             _dateText.Text = now.ToString("dddd, MMMM d");
+            UpdateSunriseText(now);
             if (_projector != null) _projector.UpdateTime(now);
             DateTime utc = DateTime.UtcNow;
             if (_cfg.LocationConfigured && utc >= _nextSkyRefreshUtc)
@@ -320,6 +331,9 @@ namespace ProjectorDash
             _weatherMetaText = Ui.Label("Settings › Ambient", 13, Ui.TextDim);
             _weatherMetaText.TextTrimming = TextTrimming.CharacterEllipsis;
             weatherCopy.Children.Add(_weatherMetaText);
+            _sunriseText = Ui.Label("NEXT SUNRISE  --", 11, Ui.Hex("#F4C66A"));
+            _sunriseText.Margin = new Thickness(0, 2, 0, 0);
+            weatherCopy.Children.Add(_sunriseText);
             TextBlock source = Ui.Label("OPEN-METEO", 10, Ui.Hex("#4D6971"));
             source.Margin = new Thickness(0, 3, 0, 0);
             weatherCopy.Children.Add(source);
@@ -407,6 +421,13 @@ namespace ProjectorDash
             Grid.SetColumnSpan(_previewOverlay, 2);
             root.Children.Add(_previewOverlay);
 
+            _overheadOverlay = BuildOverheadOverlay();
+            _overheadOverlay.Visibility = Visibility.Collapsed;
+            Grid.SetRow(_overheadOverlay, 0);
+            Grid.SetRowSpan(_overheadOverlay, 2);
+            Grid.SetColumnSpan(_overheadOverlay, 2);
+            root.Children.Add(_overheadOverlay);
+
             // --- Bottom-left: volume + brightness --------------------------
             Grid controls = new Grid();
             controls.Margin = new Thickness(28, 10, 20, 24);
@@ -474,6 +495,9 @@ namespace ProjectorDash
             card.BorderBrush = Ui.Line;
             card.BorderThickness = new Thickness(1);
             card.CornerRadius = new CornerRadius(9);
+            card.Cursor = System.Windows.Input.Cursors.Hand;
+            card.ToolTip = "Open the live through-the-ceiling sky map.";
+            card.MouseLeftButtonUp += delegate { OpenOverheadView(); };
 
             Grid grid = new Grid();
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(150) });
@@ -481,7 +505,7 @@ namespace ProjectorDash
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
             StackPanel status = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
-            TextBlock mark = Ui.Label("SKY NOW", 11, Ui.Accent);
+            TextBlock mark = Ui.Label("OVERHEAD  /  OPEN MAP", 11, Ui.Accent);
             mark.FontWeight = FontWeights.SemiBold;
             status.Children.Add(mark);
             _skyCountText = Ui.Label("SET LOCATION", 15, Ui.Text);
@@ -494,7 +518,8 @@ namespace ProjectorDash
                 Margin = new Thickness(14, 0, 16, 0),
                 VerticalAlignment = VerticalAlignment.Center
             };
-            traffic.Children.Add(Ui.Label("AIR TRAFFIC  /  ADSB.LOL", 10, Ui.Hex("#4D6971")));
+            _aircraftSourceText = Ui.Label("AIR TRAFFIC  /  CONNECTING", 10, Ui.Hex("#4D6971"));
+            traffic.Children.Add(_aircraftSourceText);
             _aircraftText = Ui.Label("Location is not configured", 14, Ui.TextDim);
             _aircraftText.TextTrimming = TextTrimming.CharacterEllipsis;
             traffic.Children.Add(_aircraftText);
@@ -506,14 +531,114 @@ namespace ProjectorDash
                 Margin = new Thickness(16, 0, 0, 0),
                 VerticalAlignment = VerticalAlignment.Center
             };
-            orbit.Children.Add(Ui.Label("ORBIT + PLANETS  /  LOCAL CALC", 10, Ui.Hex("#4D6971")));
-            _orbitText = Ui.Label("ISS and planet bearings appear here", 14, Ui.TextDim);
+            orbit.Children.Add(Ui.Label("ORBIT + NIGHT SKY  /  LOCAL CALC", 10, Ui.Hex("#4D6971")));
+            _orbitText = Ui.Label("ISS, planets, and major stars appear here", 14, Ui.TextDim);
             _orbitText.TextTrimming = TextTrimming.CharacterEllipsis;
             orbit.Children.Add(_orbitText);
             Grid.SetColumn(orbit, 2);
             grid.Children.Add(orbit);
             card.Child = grid;
             return card;
+        }
+
+        private Grid BuildOverheadOverlay()
+        {
+            Grid overlay = new Grid { Background = Ui.Hex("#050B0F") };
+            Grid inner = new Grid { Margin = new Thickness(22, 12, 22, 8) };
+            inner.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            inner.RowDefinitions.Add(new RowDefinition
+                { Height = new GridLength(1, GridUnitType.Star) });
+
+            Grid header = new Grid();
+            header.ColumnDefinitions.Add(new ColumnDefinition
+                { Width = new GridLength(1, GridUnitType.Star) });
+            header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            StackPanel heading = new StackPanel();
+            TextBlock title = Ui.Label("OVERHEAD  /  LIVE CEILING VIEW", 24, Ui.Text);
+            title.FontWeight = FontWeights.SemiBold;
+            heading.Children.Add(title);
+            TextBlock explanation = Ui.Label(
+                "The full 180° sky hemisphere, flattened to the ceiling: center is zenith (90°), every edge is horizon (0°), and the full 360° compass wraps around the center.",
+                13, Ui.TextDim);
+            heading.Children.Add(explanation);
+            header.Children.Add(heading);
+
+            StackPanel actions = new StackPanel { Orientation = Orientation.Horizontal };
+            actions.Children.Add(SmallBtn("Refresh", delegate
+            {
+                _nextSkyRefreshUtc = DateTime.MinValue;
+                RefreshSky();
+            }));
+            _ceilingMapBtn = SmallBtn("Show on projector", delegate { ToggleProjectorOverhead(); });
+            _ceilingMapBtn.Background = Ui.AccentDim;
+            _ceilingMapBtn.BorderBrush = Ui.Accent;
+            _ceilingMapBtn.IsEnabled = !_cfg.TabletOnlyMode;
+            actions.Children.Add(_ceilingMapBtn);
+            Button back = Ui.Btn("Back", 16, Ui.Accent, Ui.Hex("#041014"),
+                delegate { CloseOverheadView(); });
+            actions.Children.Add(back);
+            Grid.SetColumn(actions, 1);
+            header.Children.Add(actions);
+            inner.Children.Add(header);
+
+            Grid body = new Grid { Margin = new Thickness(0, 9, 0, 0) };
+            body.ColumnDefinitions.Add(new ColumnDefinition
+                { Width = new GridLength(1, GridUnitType.Star) });
+            body.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(300) });
+            Border mapFrame = new Border();
+            mapFrame.Background = Ui.Hex("#050B0F");
+            mapFrame.BorderBrush = Ui.Line;
+            mapFrame.BorderThickness = new Thickness(1);
+            mapFrame.CornerRadius = new CornerRadius(10);
+            mapFrame.ClipToBounds = true;
+            _overheadMap = new OverheadMap();
+            mapFrame.Child = _overheadMap;
+            body.Children.Add(mapFrame);
+
+            Border info = new Border();
+            info.Margin = new Thickness(10, 0, 0, 0);
+            info.Padding = new Thickness(16);
+            info.Background = Ui.Panel;
+            info.BorderBrush = Ui.Line;
+            info.BorderThickness = new Thickness(1);
+            info.CornerRadius = new CornerRadius(10);
+            StackPanel infoStack = new StackPanel();
+            TextBlock live = Ui.Label("LIVE STATUS", 11, Ui.Accent);
+            live.FontWeight = FontWeights.SemiBold;
+            infoStack.Children.Add(live);
+            _overheadFeedText = Ui.Label("Waiting for saved location", 15, Ui.Text);
+            _overheadFeedText.Margin = new Thickness(0, 5, 0, 0);
+            _overheadFeedText.TextWrapping = TextWrapping.Wrap;
+            infoStack.Children.Add(_overheadFeedText);
+            _overheadUpdatedText = Ui.Label("", 12, Ui.TextDim);
+            _overheadUpdatedText.Margin = new Thickness(0, 4, 0, 0);
+            infoStack.Children.Add(_overheadUpdatedText);
+            TextBlock objects = Ui.Label("OBJECTS ABOVE", 11, Ui.Accent);
+            objects.FontWeight = FontWeights.SemiBold;
+            objects.Margin = new Thickness(0, 18, 0, 0);
+            infoStack.Children.Add(objects);
+            _overheadObjectsText = Ui.Label("Scanning…", 14, Ui.TextDim);
+            _overheadObjectsText.Margin = new Thickness(0, 6, 0, 0);
+            _overheadObjectsText.TextWrapping = TextWrapping.Wrap;
+            infoStack.Children.Add(_overheadObjectsText);
+            TextBlock key = Ui.Label(
+                "CYAN  live aircraft + observed path\nAMBER  ISS + observed pass\nVIOLET  planets\nGREY  major stars\n\nEL 25° / 50° / 75° contours show elevation above the horizon; km labels show physical range. Center is zenith (90°), all edges are horizon (0°), and bearing wraps 360° around center. Aircraft are live within 40 km. Dashed lines are reported courses; solid segments are observed movement.",
+                12, Ui.TextDim);
+            key.Margin = new Thickness(0, 18, 0, 0);
+            key.TextWrapping = TextWrapping.Wrap;
+            infoStack.Children.Add(key);
+            ScrollViewer infoScroll = new ScrollViewer();
+            infoScroll.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+            infoScroll.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
+            infoScroll.PanningMode = PanningMode.VerticalOnly;
+            infoScroll.Content = infoStack;
+            info.Child = infoScroll;
+            Grid.SetColumn(info, 1);
+            body.Children.Add(info);
+            Grid.SetRow(body, 1);
+            inner.Children.Add(body);
+            overlay.Children.Add(inner);
+            return overlay;
         }
 
         private Popup BuildPowerPopup(Button target)
@@ -994,9 +1119,181 @@ namespace ProjectorDash
             return stopped;
         }
 
+        private void OpenOverheadView()
+        {
+            if (!_cfg.LocationConfigured)
+            {
+                OpenSettings(4);
+                if (_locationStatus != null)
+                    _locationStatus.Text = "Save a location before opening the live sky map.";
+                return;
+            }
+            ClosePreview();
+            if (_settingsOverlay != null &&
+                _settingsOverlay.Visibility == Visibility.Visible) CloseSettings();
+            if (_overheadOverlay == null) return;
+            _overheadOverlay.Visibility = Visibility.Visible;
+            UpdateOverheadUi();
+            _nextSkyRefreshUtc = DateTime.MinValue;
+            RefreshSky();
+        }
+
+        private void CloseOverheadView()
+        {
+            if (_overheadOverlay != null)
+                _overheadOverlay.Visibility = Visibility.Collapsed;
+            _nextSkyRefreshUtc = DateTime.MinValue;
+        }
+
+        private void ToggleProjectorOverhead()
+        {
+            if (_cfg.TabletOnlyMode || _projector == null) return;
+            if (!_projectorOverhead)
+            {
+                _overheadRestoresApp = !_projectorSleeping;
+                if (_overheadRestoresApp) SleepProjector();
+                _projectorOverhead = true;
+                _projector.ShowOverhead(true);
+                _projector.UpdateOverhead(_sky, _cfg.FacingDegrees);
+            }
+            else
+            {
+                if (_overheadRestoresApp)
+                {
+                    _overheadRestoresApp = false;
+                    WakeProjector();
+                }
+                else
+                {
+                    _projectorOverhead = false;
+                    _projector.ShowOverhead(false);
+                    _projector.SetMode(_projectorSleeping ? "clock" : _cfg.ProjectorMode);
+                }
+            }
+            UpdateOverheadUi();
+            _nextSkyRefreshUtc = DateTime.MinValue;
+        }
+
+        private void UpdateOverheadUi()
+        {
+            if (_overheadMap == null) return;
+            _overheadMap.SetData(_sky, _cfg.FacingDegrees);
+            if (_projector != null && _projectorOverhead)
+                _projector.UpdateOverhead(_sky, _cfg.FacingDegrees);
+            if (_ceilingMapBtn != null)
+            {
+                _ceilingMapBtn.Content = _projectorOverhead
+                    ? "Ceiling map: On" : "Show on projector";
+                _ceilingMapBtn.Background = _projectorOverhead ? Ui.Accent : Ui.AccentDim;
+                _ceilingMapBtn.Foreground = _projectorOverhead ? Ui.Hex("#041014") : Ui.Accent;
+            }
+            if (!_cfg.LocationConfigured)
+            {
+                _overheadFeedText.Text = "Location is not configured";
+                _overheadObjectsText.Text = "Open Settings › Ambient first.";
+                _overheadUpdatedText.Text = "";
+                return;
+            }
+            if (_sky == null)
+            {
+                _overheadFeedText.Text = "Connecting to live aircraft and ISS feeds…";
+                _overheadObjectsText.Text = "Calculating planet and star positions locally…";
+                _overheadUpdatedText.Text = "";
+                return;
+            }
+
+            _overheadFeedText.Text = _sky.AircraftFeedAvailable
+                ? (OverheadAircraftCount().ToString() + " overhead · " +
+                    _sky.Planes.Count.ToString() + " within 40 km · " +
+                    (_sky.AircraftFeedName.Length == 0 ? "live ADS-B" : _sky.AircraftFeedName))
+                : ("Aircraft feeds offline\n" + _sky.AircraftError);
+            _overheadFeedText.Foreground = _sky.AircraftFeedAvailable ? Ui.Text : Ui.Danger;
+            _overheadUpdatedText.Text = "Updated " + _sky.UpdatedUtc.ToLocalTime().ToString("h:mm:ss tt") +
+                " · markers move continuously · data sync " + SkyRefreshSeconds().ToString() + " sec";
+
+            List<string> objects = new List<string>();
+            int planeDetails = 0;
+            for (int planeIndex = 0; planeIndex < _sky.Planes.Count &&
+                planeDetails < 6; planeIndex++)
+            {
+                PlaneReading plane = _sky.Planes[planeIndex];
+                double elevation = Math.Atan2(plane.AltitudeFeet * 0.0003048,
+                    Math.Max(plane.DistanceKm, 0.05)) * 180.0 / Math.PI;
+                if (elevation < 5.0) continue;
+                planeDetails++;
+                string identity = plane.Label;
+                if (!string.IsNullOrWhiteSpace(plane.AircraftType))
+                    identity += " / " + plane.AircraftType;
+                if (!string.IsNullOrWhiteSpace(plane.Registration))
+                    identity += " / " + plane.Registration;
+                string course = plane.HasTrack
+                    ? " · course " + AmbientService.Cardinal(plane.TrackDegrees) + " " +
+                        Math.Round(plane.TrackDegrees).ToString("0") + "°"
+                    : "";
+                objects.Add(identity + " · " + Math.Round(plane.DistanceKm).ToString("0") +
+                    " km · " + Math.Round(elevation).ToString("0") +
+                    "° above horizon · " + AmbientService.Direction(plane.BearingDegrees,
+                    _cfg.FacingDegrees) + course);
+            }
+            int overheadCount = OverheadAircraftCount();
+            if (overheadCount > planeDetails)
+                objects.Add("+ " + (overheadCount - planeDetails).ToString() +
+                    " more aircraft plotted on the live view");
+            if (_sky.Iss.Available)
+                objects.Add(_sky.Iss.AboveHorizon
+                    ? "ISS / NORAD 25544 · " + Math.Round(_sky.Iss.ElevationDegrees).ToString("0") +
+                        "° above horizon · " + AmbientService.Direction(_sky.Iss.BearingDegrees,
+                        _cfg.FacingDegrees)
+                    : "ISS · below horizon");
+            foreach (PlanetReading planet in _sky.Planets)
+                objects.Add(planet.Name + " · " +
+                    Math.Round(planet.AltitudeDegrees).ToString("0") + "° above horizon · " +
+                    AmbientService.Direction(planet.BearingDegrees, _cfg.FacingDegrees));
+            int starLimit = Math.Min(4, _sky.Stars.Count);
+            for (int starIndex = 0; starIndex < starLimit; starIndex++)
+            {
+                StarReading star = _sky.Stars[starIndex];
+                objects.Add(star.Name + " · major star · " +
+                    Math.Round(star.AltitudeDegrees).ToString("0") + "° above horizon · " +
+                    AmbientService.Direction(star.BearingDegrees, _cfg.FacingDegrees));
+            }
+            _overheadObjectsText.Text = objects.Count == 0
+                ? "No tracked objects are above the horizon right now."
+                : string.Join("\n\n", objects.ToArray());
+        }
+
+        private bool OverheadIsActive()
+        {
+            return _projectorOverhead || (_overheadOverlay != null &&
+                _overheadOverlay.Visibility == Visibility.Visible);
+        }
+
+        private int SkyRefreshSeconds()
+        {
+            if (!OverheadIsActive()) return 45;
+            if (_sky != null && (!_sky.AircraftFeedAvailable ||
+                _sky.AircraftFeedName.StartsWith("airplanes.live",
+                    StringComparison.OrdinalIgnoreCase))) return 45;
+            return 15;
+        }
+
+        private int OverheadAircraftCount()
+        {
+            if (_sky == null) return 0;
+            int count = 0;
+            foreach (PlaneReading plane in _sky.Planes)
+            {
+                double elevation = Math.Atan2(plane.AltitudeFeet * 0.0003048,
+                    Math.Max(plane.DistanceKm, 0.05)) * 180.0 / Math.PI;
+                if (elevation >= 5.0) count++;
+            }
+            return count;
+        }
+
         private void OpenPreview()
         {
             if (_cfg.TabletOnlyMode || _previewOverlay == null) return;
+            CloseOverheadView();
             _previewOverlay.Visibility = Visibility.Visible;
             RefreshPreview();
             Dispatcher.BeginInvoke(new Action(RefreshPreview),
@@ -1345,6 +1642,9 @@ namespace ProjectorDash
             if (_projector != null)
             {
                 _projector.SetMode("clock");
+                _projector.ShowOverhead(_projectorOverhead);
+                if (_projectorOverhead)
+                    _projector.UpdateOverhead(_sky, _cfg.FacingDegrees);
                 _projector.UpdateTime(DateTime.Now);
             }
             UpdateSleepButton();
@@ -1361,12 +1661,16 @@ namespace ProjectorDash
                 _cfg.LaunchFullscreen);
             _sleepingWindows.Clear();
             _projectorSleeping = false;
+            _projectorOverhead = false;
+            _overheadRestoresApp = false;
             if (_projector != null)
             {
+                _projector.ShowOverhead(false);
                 _projector.SetMode(_cfg.ProjectorMode);
                 _projector.UpdateTime(DateTime.Now);
             }
             UpdateSleepButton();
+            UpdateOverheadUi();
             if (restoredTabletApp) EnterTabletAppMode();
             else Activate();
         }
@@ -1484,6 +1788,7 @@ namespace ProjectorDash
         private void OpenSettings(int pageIndex)
         {
             ClosePreview();
+            CloseOverheadView();
             RefreshShortcutList(-1);
             _editResW.Text = _cfg.ReservedWidth.ToString();
             _editResH.Text = _cfg.ReservedHeight.ToString();
@@ -1786,13 +2091,13 @@ namespace ProjectorDash
             _locationStatus.Foreground = Ui.Accent;
             left.Children.Add(_locationStatus);
             left.Children.Add(WrappedNote(
-                "Weather: Open-Meteo. Aircraft: adsb.lol. ISS: Where the ISS at? No API keys, accounts, subscriptions, or paid services."));
+                "Weather + sunrise: Open-Meteo. Aircraft: adsb.lol with airplanes.live fallback. ISS: Where the ISS at? Stars and planets calculate locally. No API keys, accounts, subscriptions, or paid services."));
             page.Children.Add(left);
 
             StackPanel right = new StackPanel();
             right.Children.Add(SectionTitle("Accuracy + orientation"));
             right.Children.Add(WrappedNote(
-                "You can refine the saved coordinates. Set the true compass direction faced by the top of this display for room-relative left/right cues."));
+                "You can refine the saved coordinates. Enter the true compass direction toward the physical top edge of the projected image. If that edge is above your head, use the direction your head points; if it is above your feet, use the direction your feet point. The ceiling sky is seen from below, so east/west are mirrored from a ground map."));
             StackPanel coordinates = new StackPanel
             {
                 Orientation = Orientation.Horizontal,
@@ -1817,11 +2122,11 @@ namespace ProjectorDash
                 Orientation = Orientation.Horizontal,
                 Margin = new Thickness(0, 10, 0, 0)
             };
-            _facingBtn = SmallBtn("View faces: N", delegate { CycleFacingDirection(); });
+            _facingBtn = SmallBtn("Top edge: N", delegate { CycleFacingDirection(); });
             orientation.Children.Add(_facingBtn);
             _editFacingDegrees = Ui.Input("0", 16);
             _editFacingDegrees.Width = 70;
-            _editFacingDegrees.ToolTip = "Exact true heading in degrees (0 north, 90 east).";
+            _editFacingDegrees.ToolTip = "True heading toward the projected image's top edge (0 north, 90 east).";
             orientation.Children.Add(_editFacingDegrees);
             Button saveFacing = SmallBtn("Save heading °", delegate { SaveFacingDirection(); });
             saveFacing.Margin = new Thickness(8, 0, 0, 0);
@@ -1926,7 +2231,7 @@ namespace ProjectorDash
                 _editLongitude.Text = _cfg.LocationConfigured
                     ? _cfg.Longitude.ToString("0.######", CultureInfo.InvariantCulture) : "";
             if (_facingBtn != null)
-                _facingBtn.Content = "View faces: " + AmbientService.Cardinal(_cfg.FacingDegrees);
+                _facingBtn.Content = "Top edge: " + AmbientService.Cardinal(_cfg.FacingDegrees);
             if (_editFacingDegrees != null)
                 _editFacingDegrees.Text = _cfg.FacingDegrees.ToString(CultureInfo.InvariantCulture);
             if (_temperatureUnitBtn != null)
@@ -2066,11 +2371,28 @@ namespace ProjectorDash
             }, TaskScheduler.FromCurrentSynchronizationContext());
         }
 
+        private void UpdateSunriseText(DateTime now)
+        {
+            if (_sunriseText == null) return;
+            if (_weather == null || _weather.NextSunrise == DateTime.MinValue)
+            {
+                _sunriseText.Text = "NEXT SUNRISE  --";
+                return;
+            }
+            TimeSpan until = _weather.NextSunrise - now;
+            if (until.TotalSeconds < 0) until = TimeSpan.Zero;
+            string countdown = until.TotalHours >= 1.0
+                ? ((int)until.TotalHours).ToString() + "h " + until.Minutes.ToString("00") + "m"
+                : Math.Max(0, until.Minutes).ToString() + "m";
+            _sunriseText.Text = "NEXT SUNRISE  " +
+                _weather.NextSunrise.ToString("ddd h:mm tt") + "  /  " + countdown;
+        }
+
         private void RefreshSky()
         {
             if (!_cfg.LocationConfigured || _skyRefreshBusy) return;
             _skyRefreshBusy = true;
-            _nextSkyRefreshUtc = DateTime.UtcNow.AddSeconds(45);
+            _nextSkyRefreshUtc = DateTime.UtcNow.AddSeconds(SkyRefreshSeconds());
             AmbientService.GetSkyAsync(_cfg.Latitude, _cfg.Longitude).ContinueWith(
                 delegate(Task<SkyReading> task)
                 {
@@ -2088,14 +2410,19 @@ namespace ProjectorDash
                 _weatherTempText.Text = "--";
                 _weatherConditionText.Text = "SET LOCATION";
                 _weatherMetaText.Text = "Settings › Ambient";
+                UpdateSunriseText(DateTime.Now);
                 _skyCountText.Text = "SET LOCATION";
+                if (_aircraftSourceText != null)
+                    _aircraftSourceText.Text = "AIR TRAFFIC  /  LOCATION NEEDED";
                 _aircraftText.Text = "Location is not configured";
-                _orbitText.Text = "ISS and planet bearings appear here";
+                _orbitText.Text = "ISS, planets, and major stars appear here";
                 if (_projector != null)
                 {
-                    _projector.UpdateWeather("--", "Set location on the tablet", "Settings › Ambient");
-                    _projector.UpdateSky("Set a location to show aircraft, ISS, and planets");
+                    _projector.UpdateWeather("--", "Set location on the tablet",
+                        "Settings › Ambient", DateTime.MinValue);
+                    _projector.UpdateSky("Set a location to show aircraft, ISS, planets, and stars");
                 }
+                UpdateOverheadUi();
                 return;
             }
 
@@ -2108,10 +2435,12 @@ namespace ProjectorDash
                     Math.Round(_weather.High).ToString("0") + "° / L " +
                     Math.Round(_weather.Low).ToString("0") + "°  ·  Wind " +
                     Math.Round(_weather.WindSpeed).ToString("0") + " " + _weather.WindUnit;
+                UpdateSunriseText(DateTime.Now);
                 if (_projector != null)
                 {
                     _projector.UpdateWeather(degree + (_weather.Fahrenheit ? "F" : "C"),
-                        _weather.Condition, _cfg.LocationName + "  ·  " + _weatherMetaText.Text);
+                        _weather.Condition, _cfg.LocationName + "  ·  " +
+                        _weatherMetaText.Text, _weather.NextSunrise);
                 }
             }
             else
@@ -2119,28 +2448,42 @@ namespace ProjectorDash
                 _weatherTempText.Text = "--";
                 _weatherConditionText.Text = "LOADING WEATHER";
                 _weatherMetaText.Text = _cfg.LocationName;
+                UpdateSunriseText(DateTime.Now);
             }
 
             if (_sky == null)
             {
                 _skyCountText.Text = "SCANNING";
+                if (_aircraftSourceText != null)
+                    _aircraftSourceText.Text = "AIR TRAFFIC  /  CONNECTING";
                 _aircraftText.Text = "Checking nearby airspace…";
-                _orbitText.Text = "Calculating ISS and planets…";
+                _orbitText.Text = "Calculating ISS, planets, and stars…";
+                UpdateOverheadUi();
                 return;
             }
 
             if (!_sky.AircraftFeedAvailable)
             {
                 _skyCountText.Text = "FEED OFFLINE";
-                _aircraftText.Text = "Aircraft feed unavailable · retrying automatically";
+                if (_aircraftSourceText != null)
+                    _aircraftSourceText.Text = "AIR TRAFFIC  /  BOTH FREE FEEDS FAILED";
+                _aircraftText.Text = (_sky.AircraftError.Length == 0
+                    ? "Aircraft feed unavailable" : _sky.AircraftError) +
+                    " · retrying automatically";
             }
             else
             {
+                if (_aircraftSourceText != null)
+                    _aircraftSourceText.Text = "AIR TRAFFIC  /  " +
+                        (_sky.AircraftFeedName.Length == 0
+                            ? "LIVE ADS-B" : _sky.AircraftFeedName.ToUpperInvariant());
                 _skyCountText.Text = _sky.Planes.Count == 0 ? "CLEAR AIRSPACE" :
                     _sky.Planes.Count.ToString() + (_sky.Planes.Count == 1 ? " AIRCRAFT" : " AIRCRAFT");
                 List<string> traffic = new List<string>();
-                foreach (PlaneReading plane in _sky.Planes)
+                int trafficLimit = Math.Min(4, _sky.Planes.Count);
+                for (int trafficIndex = 0; trafficIndex < trafficLimit; trafficIndex++)
                 {
+                    PlaneReading plane = _sky.Planes[trafficIndex];
                     traffic.Add(plane.Label + " · " + Math.Round(plane.DistanceKm).ToString("0") +
                         " km " + AmbientService.Direction(plane.BearingDegrees, _cfg.FacingDegrees) +
                         " · " + plane.AltitudeFeet.ToString("N0") + " ft");
@@ -2166,6 +2509,15 @@ namespace ProjectorDash
                     AmbientService.Direction(planet.BearingDegrees, _cfg.FacingDegrees));
             }
             if (_sky.Planets.Count == 0) orbit.Add("No planets above horizon");
+            int brightStarLimit = Math.Min(2, _sky.Stars.Count);
+            for (int brightStarIndex = 0; brightStarIndex < brightStarLimit;
+                brightStarIndex++)
+            {
+                StarReading star = _sky.Stars[brightStarIndex];
+                orbit.Add(star.Name + " star " +
+                    Math.Round(star.AltitudeDegrees).ToString("0") + "° " +
+                    AmbientService.Direction(star.BearingDegrees, _cfg.FacingDegrees));
+            }
             _orbitText.Text = string.Join("   |   ", orbit.ToArray());
 
             if (_projector != null)
@@ -2176,6 +2528,7 @@ namespace ProjectorDash
                     : "Aircraft feed offline";
                 _projector.UpdateSky(planes + "  ·  " + string.Join("  ·  ", orbit.ToArray()));
             }
+            UpdateOverheadUi();
         }
 
         private void RefreshAudioDeviceLists()
@@ -2724,6 +3077,7 @@ namespace ProjectorDash
             if (_alarmOverlay == null) return;
             if (_tabletAppMode || _mirrorFullscreen) ReturnToDashboard();
             ClosePreview();
+            CloseOverheadView();
             _alarmRingTime.Text = now.ToString("h:mm");
             _settingsOverlay.Visibility = Visibility.Collapsed;
             _alarmOverlay.Visibility = Visibility.Visible;

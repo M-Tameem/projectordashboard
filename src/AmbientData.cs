@@ -38,6 +38,7 @@ namespace ProjectorDash
         public double WindSpeed;
         public int WeatherCode;
         public bool Fahrenheit;
+        public DateTime NextSunrise;
         public DateTime UpdatedUtc;
 
         public string Unit { get { return Fahrenheit ? "°F" : "°C"; } }
@@ -47,11 +48,17 @@ namespace ProjectorDash
 
     public sealed class PlaneReading
     {
+        public string Identifier;
         public string Label;
+        public string Registration;
         public string AircraftType;
         public double DistanceKm;
         public double BearingDegrees;
         public int AltitudeFeet;
+        public double TrackDegrees;
+        public double SpeedKnots;
+        public double PositionAgeSeconds;
+        public bool HasTrack;
     }
 
     public sealed class IssReading
@@ -70,14 +77,27 @@ namespace ProjectorDash
         public double BearingDegrees;
     }
 
+    public sealed class StarReading
+    {
+        public string Name;
+        public double AltitudeDegrees;
+        public double BearingDegrees;
+        public double Magnitude;
+    }
+
     public sealed class SkyReading
     {
         public readonly List<PlaneReading> Planes = new List<PlaneReading>();
         public readonly List<PlanetReading> Planets = new List<PlanetReading>();
+        public readonly List<StarReading> Stars = new List<StarReading>();
         public IssReading Iss = new IssReading();
         public DateTime UpdatedUtc;
         public bool AircraftFeedAvailable;
         public bool IssFeedAvailable;
+        public string AircraftFeedName = "";
+        public string AircraftError = "";
+        public double ObserverLatitude;
+        public double ObserverLongitude;
     }
 
     /// <summary>
@@ -89,6 +109,9 @@ namespace ProjectorDash
     {
         private const double EarthRadiusKm = 6371.0;
         private const double Deg = Math.PI / 180.0;
+        private static readonly object FallbackSync = new object();
+        private static DateTime _fallbackFetchedUtc = DateTime.MinValue;
+        private static List<PlaneReading> _fallbackPlanes;
 
         public static async Task<AmbientLocation> FindLocationAsync(string search)
         {
@@ -125,8 +148,8 @@ namespace ProjectorDash
             string url = "https://api.open-meteo.com/v1/forecast?latitude=" + lat +
                 "&longitude=" + lon +
                 "&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m" +
-                "&daily=temperature_2m_max,temperature_2m_min" +
-                "&forecast_days=1&timezone=auto&temperature_unit=" + unit +
+                "&daily=temperature_2m_max,temperature_2m_min,sunrise" +
+                "&forecast_days=2&timezone=auto&temperature_unit=" + unit +
                 "&wind_speed_unit=" + wind;
 
             Dictionary<string, object> root = AsObject(await DownloadAsync(url));
@@ -140,6 +163,8 @@ namespace ProjectorDash
             result.WeatherCode = (int)Math.Round(NumberValue(current, "weather_code"));
             result.High = FirstNumber(daily, "temperature_2m_max");
             result.Low = FirstNumber(daily, "temperature_2m_min");
+            result.NextSunrise = FirstFutureDateTime(daily, "sunrise",
+                ParseDateTime(StringValue(current, "time")));
             result.Fahrenheit = fahrenheit;
             result.UpdatedUtc = DateTime.UtcNow;
             return result;
@@ -148,16 +173,25 @@ namespace ProjectorDash
         public static async Task<SkyReading> GetSkyAsync(double latitude, double longitude)
         {
             SkyReading result = new SkyReading();
+            result.ObserverLatitude = latitude;
+            result.ObserverLongitude = longitude;
             result.Planets.AddRange(CalculatePlanets(DateTime.UtcNow, latitude, longitude));
+            result.Stars.AddRange(CalculateStars(DateTime.UtcNow, latitude, longitude));
 
-            Task<List<PlaneReading>> planes = GetPlanesAsync(latitude, longitude);
+            Task<PlaneFeedResult> planes = GetPlanesAsync(latitude, longitude);
             Task<IssReading> iss = GetIssAsync(latitude, longitude);
             try
             {
-                result.Planes.AddRange(await planes);
+                PlaneFeedResult feed = await planes;
+                result.Planes.AddRange(feed.Planes);
                 result.AircraftFeedAvailable = true;
+                result.AircraftFeedName = feed.Name;
             }
-            catch { result.AircraftFeedAvailable = false; }
+            catch (Exception ex)
+            {
+                result.AircraftFeedAvailable = false;
+                result.AircraftError = DescribeNetworkError(ex);
+            }
             try
             {
                 result.Iss = await iss;
@@ -172,14 +206,104 @@ namespace ProjectorDash
             return result;
         }
 
-        private static async Task<List<PlaneReading>> GetPlanesAsync(
+        private sealed class PlaneFeedResult
+        {
+            public string Name;
+            public List<PlaneReading> Planes;
+        }
+
+        private static async Task<PlaneFeedResult> GetPlanesAsync(
             double latitude, double longitude)
         {
             string lat = latitude.ToString("0.#####", CultureInfo.InvariantCulture);
             string lon = longitude.ToString("0.#####", CultureInfo.InvariantCulture);
-            // adsb.lol's radius is nautical miles. Ask for 25 nm, then keep
-            // only aircraft within 40 km so "overhead" remains meaningful.
-            string url = "https://api.adsb.lol/v2/point/" + lat + "/" + lon + "/25";
+            string suffix = "/v2/point/" + lat + "/" + lon + "/25";
+            Exception primaryError;
+            try
+            {
+                PlaneFeedResult primary = new PlaneFeedResult();
+                primary.Name = "adsb.lol";
+                primary.Planes = await GetPlanesFromAsync(
+                    "https://api.adsb.lol" + suffix, latitude, longitude);
+                return primary;
+            }
+            catch (Exception ex) { primaryError = ex; }
+
+            List<PlaneReading> cached = GetCachedFallbackPlanes();
+            if (cached != null)
+            {
+                return new PlaneFeedResult
+                {
+                    Name = "airplanes.live fallback · quota-safe 3 min sync",
+                    Planes = cached
+                };
+            }
+
+            try
+            {
+                PlaneFeedResult fallback = new PlaneFeedResult();
+                fallback.Name = "airplanes.live fallback · quota-safe 3 min sync";
+                fallback.Planes = await GetPlanesFromAsync(
+                    "https://api.airplanes.live" + suffix, latitude, longitude);
+                StoreFallbackPlanes(fallback.Planes);
+                return fallback;
+            }
+            catch (Exception fallbackError)
+            {
+                throw new InvalidOperationException("adsb.lol " +
+                    DescribeNetworkError(primaryError) + "; airplanes.live " +
+                    DescribeNetworkError(fallbackError), fallbackError);
+            }
+        }
+
+        private static List<PlaneReading> GetCachedFallbackPlanes()
+        {
+            lock (FallbackSync)
+            {
+                if (_fallbackPlanes == null) return null;
+                double age = (DateTime.UtcNow - _fallbackFetchedUtc).TotalSeconds;
+                if (age < 0.0 || age >= 180.0) return null;
+                return ClonePlanes(_fallbackPlanes, age);
+            }
+        }
+
+        private static void StoreFallbackPlanes(List<PlaneReading> planes)
+        {
+            lock (FallbackSync)
+            {
+                _fallbackFetchedUtc = DateTime.UtcNow;
+                _fallbackPlanes = ClonePlanes(planes, 0.0);
+            }
+        }
+
+        private static List<PlaneReading> ClonePlanes(List<PlaneReading> source,
+            double additionalAgeSeconds)
+        {
+            List<PlaneReading> result = new List<PlaneReading>();
+            foreach (PlaneReading value in source)
+            {
+                result.Add(new PlaneReading
+                {
+                    Identifier = value.Identifier,
+                    Label = value.Label,
+                    Registration = value.Registration,
+                    AircraftType = value.AircraftType,
+                    DistanceKm = value.DistanceKm,
+                    BearingDegrees = value.BearingDegrees,
+                    AltitudeFeet = value.AltitudeFeet,
+                    TrackDegrees = value.TrackDegrees,
+                    SpeedKnots = value.SpeedKnots,
+                    PositionAgeSeconds = value.PositionAgeSeconds +
+                        additionalAgeSeconds,
+                    HasTrack = value.HasTrack
+                });
+            }
+            return result;
+        }
+
+        private static async Task<List<PlaneReading>> GetPlanesFromAsync(
+            string url, double latitude, double longitude)
+        {
             Dictionary<string, object> root = AsObject(await DownloadAsync(url));
             object raw;
             List<PlaneReading> result = new List<PlaneReading>();
@@ -209,19 +333,57 @@ namespace ProjectorDash
                 if (label.Length == 0) label = "Aircraft";
 
                 PlaneReading plane = new PlaneReading();
+                plane.Identifier = StringValue(item, "hex").TrimStart('~').Trim();
                 plane.Label = label;
+                plane.Registration = StringValue(item, "r").Trim();
                 plane.AircraftType = StringValue(item, "t").Trim();
                 plane.DistanceKm = distance;
                 plane.BearingDegrees = InitialBearing(latitude, longitude, planeLat, planeLon);
                 plane.AltitudeFeet = (int)Math.Round(altitude);
+                double track;
+                if (item.ContainsKey("track") && TryNumber(item["track"], out track))
+                {
+                    plane.TrackDegrees = track;
+                    plane.HasTrack = true;
+                }
+                double speed;
+                if (item.ContainsKey("gs") && TryNumber(item["gs"], out speed))
+                    plane.SpeedKnots = speed;
+                double age;
+                if (item.ContainsKey("seen_pos") && TryNumber(item["seen_pos"], out age))
+                    plane.PositionAgeSeconds = age;
                 result.Add(plane);
             }
             result.Sort(delegate(PlaneReading a, PlaneReading b)
             {
                 return a.DistanceKm.CompareTo(b.DistanceKm);
             });
-            if (result.Count > 4) result.RemoveRange(4, result.Count - 4);
+            if (result.Count > 12) result.RemoveRange(12, result.Count - 12);
             return result;
+        }
+
+        private static string DescribeNetworkError(Exception error)
+        {
+            if (error == null) return "failed";
+            InvalidOperationException invalid = error as InvalidOperationException;
+            if (invalid != null && invalid.InnerException != null &&
+                invalid.Message.StartsWith("adsb.lol", StringComparison.OrdinalIgnoreCase))
+                return invalid.Message;
+            WebException web = error as WebException;
+            if (web != null)
+            {
+                HttpWebResponse response = web.Response as HttpWebResponse;
+                if (response != null) return "HTTP " + ((int)response.StatusCode).ToString();
+                if (web.Status == WebExceptionStatus.TrustFailure)
+                    return "TLS/certificate error";
+                if (web.Status == WebExceptionStatus.Timeout) return "timed out";
+                if (web.Status == WebExceptionStatus.NameResolutionFailure)
+                    return "DNS failed";
+                if (web.Status == WebExceptionStatus.ConnectFailure)
+                    return "connection failed";
+                return web.Status.ToString();
+            }
+            return error.Message;
         }
 
         private static async Task<IssReading> GetIssAsync(
@@ -291,9 +453,12 @@ namespace ProjectorDash
             double delta = NormalizeSignedDegrees(bearing - facingDegrees);
             double a = Math.Abs(delta);
             if (a <= 22.5) return "ahead";
-            if (a <= 67.5) return delta < 0 ? "ahead-left" : "ahead-right";
-            if (a <= 112.5) return delta < 0 ? "left" : "right";
-            if (a <= 157.5) return delta < 0 ? "behind-left" : "behind-right";
+            // This describes the upward-looking ceiling view. Compass
+            // bearings increase clockwise on a ground map, but toward the
+            // viewer's left when the same sky is seen from underneath.
+            if (a <= 67.5) return delta > 0 ? "ahead-left" : "ahead-right";
+            if (a <= 112.5) return delta > 0 ? "left" : "right";
+            if (a <= 157.5) return delta > 0 ? "behind-left" : "behind-right";
             return "behind";
         }
 
@@ -322,7 +487,54 @@ namespace ProjectorDash
             new Orbit("Neptune", 30.06992276,.00026291,.00859048,.00005105,1.77004347,.00035372,-55.12002969,218.45945325,44.96476227,-.32241464,131.78422574,-.00508664)
         };
 
-        private static List<PlanetReading> CalculatePlanets(
+        private sealed class BrightStar
+        {
+            public string Name;
+            public double RightAscensionHours;
+            public double DeclinationDegrees;
+            public double Magnitude;
+            public BrightStar(string name, double ra, double dec, double magnitude)
+            {
+                Name = name;
+                RightAscensionHours = ra;
+                DeclinationDegrees = dec;
+                Magnitude = magnitude;
+            }
+        }
+
+        // A compact J2000 catalog of the brightest and most recognizable stars.
+        // Keeping this embedded makes the star layer instant, offline, and exact
+        // enough for a ceiling orientation view without another web service.
+        private static readonly BrightStar[] BrightStars = new BrightStar[]
+        {
+            new BrightStar("Sirius", 6.752477, -16.716116, -1.46),
+            new BrightStar("Canopus", 6.399200, -52.695700, -0.74),
+            new BrightStar("Arcturus", 14.261030, 19.182410, -0.05),
+            new BrightStar("Vega", 18.615649, 38.783690, 0.03),
+            new BrightStar("Capella", 5.278155, 45.997990, 0.08),
+            new BrightStar("Rigel", 5.242298, -8.201640, 0.13),
+            new BrightStar("Procyon", 7.655033, 5.224990, 0.34),
+            new BrightStar("Achernar", 1.628570, -57.236750, 0.46),
+            new BrightStar("Betelgeuse", 5.919529, 7.407060, 0.50),
+            new BrightStar("Hadar", 14.063700, -60.373000, 0.61),
+            new BrightStar("Altair", 19.846389, 8.868300, 0.76),
+            new BrightStar("Acrux", 12.443300, -63.099000, 0.77),
+            new BrightStar("Aldebaran", 4.598677, 16.509300, 0.85),
+            new BrightStar("Antares", 16.490129, -26.432000, 0.96),
+            new BrightStar("Spica", 13.419883, -11.161300, 0.97),
+            new BrightStar("Pollux", 7.755263, 28.026200, 1.14),
+            new BrightStar("Fomalhaut", 22.960848, -29.622200, 1.16),
+            new BrightStar("Deneb", 20.690532, 45.280300, 1.25),
+            new BrightStar("Regulus", 10.139530, 11.967200, 1.35),
+            new BrightStar("Castor", 7.576670, 31.888300, 1.58),
+            new BrightStar("Bellatrix", 5.418850, 6.349700, 1.64),
+            new BrightStar("Elnath", 5.438200, 28.607500, 1.65),
+            new BrightStar("Alnilam", 5.603560, -1.201900, 1.69),
+            new BrightStar("Dubhe", 11.062100, 61.750800, 1.79),
+            new BrightStar("Polaris", 2.530300, 89.264100, 1.98)
+        };
+
+        public static List<PlanetReading> CalculatePlanets(
             DateTime utc, double latitude, double longitude)
         {
             double jd = JulianDate(utc);
@@ -367,6 +579,45 @@ namespace ProjectorDash
             result.Sort(delegate(PlanetReading a, PlanetReading b)
             {
                 return b.AltitudeDegrees.CompareTo(a.AltitudeDegrees);
+            });
+            return result;
+        }
+
+        public static List<StarReading> CalculateStars(
+            DateTime utc, double latitude, double longitude)
+        {
+            double jd = JulianDate(utc);
+            double t = (jd - 2451545.0) / 36525.0;
+            double gmst = NormalizeDegrees(280.46061837 +
+                360.98564736629 * (jd - 2451545.0) + .000387933 * t * t -
+                t * t * t / 38710000.0);
+            double lat = latitude * Deg;
+            List<StarReading> result = new List<StarReading>();
+
+            foreach (BrightStar star in BrightStars)
+            {
+                double ra = star.RightAscensionHours * 15.0 * Deg;
+                double dec = star.DeclinationDegrees * Deg;
+                PrecessFromJ2000(ref ra, ref dec, t);
+                double hourAngle = NormalizeSignedDegrees(
+                    gmst + longitude - ra / Deg) * Deg;
+                double altitude = Math.Asin(Math.Sin(lat) * Math.Sin(dec) +
+                    Math.Cos(lat) * Math.Cos(dec) * Math.Cos(hourAngle));
+                if (altitude / Deg <= 1.0) continue;
+                double azimuth = Math.Atan2(Math.Sin(hourAngle),
+                    Math.Cos(hourAngle) * Math.Sin(lat) -
+                    Math.Tan(dec) * Math.Cos(lat)) / Deg + 180.0;
+                result.Add(new StarReading
+                {
+                    Name = star.Name,
+                    Magnitude = star.Magnitude,
+                    AltitudeDegrees = altitude / Deg,
+                    BearingDegrees = NormalizeDegrees(azimuth)
+                });
+            }
+            result.Sort(delegate(StarReading a, StarReading b)
+            {
+                return a.Magnitude.CompareTo(b.Magnitude);
             });
             return result;
         }
@@ -461,12 +712,24 @@ namespace ProjectorDash
         private static async Task<string> DownloadAsync(string url)
         {
             ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072; // TLS 1.2 on .NET 4.5
-            using (WebClient client = new WebClient())
+            using (WebClient client = new TimeoutWebClient())
             {
                 client.Encoding = System.Text.Encoding.UTF8;
                 client.Headers[HttpRequestHeader.UserAgent] =
                     "ProjectorDashboard/" + SelfUpdater.CurrentVersion;
                 return await client.DownloadStringTaskAsync(new Uri(url)).ConfigureAwait(false);
+            }
+        }
+
+        private sealed class TimeoutWebClient : WebClient
+        {
+            protected override WebRequest GetWebRequest(Uri address)
+            {
+                WebRequest request = base.GetWebRequest(address);
+                request.Timeout = 8000;
+                HttpWebRequest http = request as HttpWebRequest;
+                if (http != null) http.ReadWriteTimeout = 8000;
+                return request;
             }
         }
 
@@ -510,6 +773,33 @@ namespace ProjectorDash
             if (array == null || array.Length == 0 || !TryNumber(array[0], out result))
                 throw new InvalidOperationException("The data service omitted " + key + ".");
             return result;
+        }
+
+        private static DateTime ParseDateTime(string value)
+        {
+            DateTime parsed;
+            return DateTime.TryParse(value, CultureInfo.InvariantCulture,
+                DateTimeStyles.AllowWhiteSpaces, out parsed) ? parsed : DateTime.Now;
+        }
+
+        private static DateTime FirstFutureDateTime(Dictionary<string, object> item,
+            string key, DateTime after)
+        {
+            object value;
+            if (!item.TryGetValue(key, out value)) return DateTime.MinValue;
+            object[] array = value as object[];
+            if (array == null) return DateTime.MinValue;
+            DateTime last = DateTime.MinValue;
+            foreach (object raw in array)
+            {
+                DateTime parsed;
+                if (!DateTime.TryParse(Convert.ToString(raw,
+                    CultureInfo.InvariantCulture), CultureInfo.InvariantCulture,
+                    DateTimeStyles.AllowWhiteSpaces, out parsed)) continue;
+                last = parsed;
+                if (parsed >= after) return parsed;
+            }
+            return last;
         }
 
         private static bool TryNumber(object value, out double result)

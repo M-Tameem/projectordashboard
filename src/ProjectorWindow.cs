@@ -14,13 +14,18 @@ namespace ProjectorDash
     /// </summary>
     public class ProjectorWindow : Window
     {
+        private readonly Grid _root;
         private readonly Grid _ambient;
+        private readonly Grid _overhead;
+        private readonly OverheadMap _overheadMap;
         private readonly TextBlock _clock;
         private readonly TextBlock _date;
         private readonly TextBlock _temperature;
         private readonly TextBlock _condition;
         private readonly TextBlock _weatherDetail;
+        private readonly TextBlock _sunrise;
         private readonly TextBlock _sky;
+        private string _ambientMode = "clock";
 
         public ProjectorWindow(WinForms.Screen screen, string mode)
         {
@@ -99,6 +104,10 @@ namespace ProjectorDash
             _weatherDetail.Margin = new Thickness(0, 10, 0, 0);
             _weatherDetail.TextWrapping = TextWrapping.Wrap;
             weather.Children.Add(_weatherDetail);
+            _sunrise = Ui.Label("NEXT SUNRISE  --", 16, Ui.Hex("#F4C66A"));
+            _sunrise.Margin = new Thickness(0, 12, 0, 0);
+            _sunrise.FontWeight = FontWeights.SemiBold;
+            weather.Children.Add(_sunrise);
             Grid.SetColumn(weather, 2);
             center.Children.Add(weather);
             Grid.SetRow(center, 1);
@@ -118,7 +127,7 @@ namespace ProjectorDash
             skyMark.FontWeight = FontWeights.SemiBold;
             skyMark.VerticalAlignment = VerticalAlignment.Center;
             skyGrid.Children.Add(skyMark);
-            _sky = Ui.Label("Set a location to show aircraft, ISS, and planets", 17, Ui.TextDim);
+            _sky = Ui.Label("Set a location to show aircraft, ISS, planets, and stars", 17, Ui.TextDim);
             _sky.Margin = new Thickness(28, 0, 0, 0);
             _sky.TextAlignment = TextAlignment.Right;
             _sky.TextTrimming = TextTrimming.CharacterEllipsis;
@@ -128,7 +137,15 @@ namespace ProjectorDash
             Grid.SetRow(skyBar, 2);
             _ambient.Children.Add(skyBar);
 
-            Content = _ambient;
+            _overhead = new Grid { Background = Ui.Hex("#050B0F") };
+            _overheadMap = new OverheadMap { Margin = new Thickness(28) };
+            _overhead.Children.Add(_overheadMap);
+            _overhead.Visibility = Visibility.Collapsed;
+
+            _root = new Grid();
+            _root.Children.Add(_ambient);
+            _root.Children.Add(_overhead);
+            Content = _root;
             SetMode(mode);
             SourceInitialized += delegate { ScreenUtil.FillScreen(this, screen); };
             UpdateTime(DateTime.Now);
@@ -136,8 +153,22 @@ namespace ProjectorDash
 
         public void SetMode(string mode)
         {
-            _ambient.Visibility = mode == "blank"
-                ? Visibility.Collapsed : Visibility.Visible;
+            _ambientMode = mode;
+            if (_overhead.Visibility != Visibility.Visible)
+                _ambient.Visibility = mode == "blank"
+                    ? Visibility.Collapsed : Visibility.Visible;
+        }
+
+        public void ShowOverhead(bool show)
+        {
+            _overhead.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+            _ambient.Visibility = show ? Visibility.Collapsed :
+                (_ambientMode == "blank" ? Visibility.Collapsed : Visibility.Visible);
+        }
+
+        public void UpdateOverhead(SkyReading sky, int facingDegrees)
+        {
+            _overheadMap.SetData(sky, facingDegrees);
         }
 
         public void UpdateTime(DateTime now)
@@ -145,13 +176,35 @@ namespace ProjectorDash
             if (_ambient.Visibility != Visibility.Visible) return;
             _clock.Text = now.ToString("h:mm");
             _date.Text = now.ToString("dddd, MMMM d");
+            UpdateSunrise(now);
         }
 
-        public void UpdateWeather(string temperature, string condition, string detail)
+        private DateTime _nextSunrise = DateTime.MinValue;
+
+        public void UpdateWeather(string temperature, string condition, string detail,
+            DateTime nextSunrise)
         {
             _temperature.Text = temperature;
             _condition.Text = condition;
             _weatherDetail.Text = detail;
+            _nextSunrise = nextSunrise;
+            UpdateSunrise(DateTime.Now);
+        }
+
+        private void UpdateSunrise(DateTime now)
+        {
+            if (_nextSunrise == DateTime.MinValue)
+            {
+                _sunrise.Text = "NEXT SUNRISE  --";
+                return;
+            }
+            TimeSpan until = _nextSunrise - now;
+            if (until.TotalSeconds < 0) until = TimeSpan.Zero;
+            string countdown = until.TotalHours >= 1.0
+                ? ((int)until.TotalHours).ToString() + "h " + until.Minutes.ToString("00") + "m"
+                : Math.Max(0, until.Minutes).ToString() + "m";
+            _sunrise.Text = "NEXT SUNRISE  " + _nextSunrise.ToString("ddd h:mm tt") +
+                "  /  " + countdown;
         }
 
         public void UpdateSky(string summary)
