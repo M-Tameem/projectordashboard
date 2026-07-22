@@ -914,7 +914,7 @@ namespace ProjectorDash
             {
                 AircraftTrack track = pair.Value;
                 if ((now - track.LastReceivedUtc).TotalSeconds > 90.0) continue;
-                double elapsed = Math.Max(0.0, Math.Min(210.0,
+                double elapsed = Math.Max(0.0, Math.Min(75.0,
                     (now - track.AnchorUtc).TotalSeconds));
                 double speed = track.HasTrack
                     ? track.SpeedKnots * 1.852 / 3600.0 : 0.0;

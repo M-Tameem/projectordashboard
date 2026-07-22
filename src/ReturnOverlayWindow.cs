@@ -13,11 +13,12 @@ namespace ProjectorDash
     /// </summary>
     public sealed class ReturnOverlayWindow : Window
     {
-        public ReturnOverlayWindow(WinForms.Screen tablet, Action showDashboard,
-            Action showRemote, Action sleepDisplay, Action emergencyOff)
+        public ReturnOverlayWindow(WinForms.Screen tablet, bool screenOffEnabled,
+            Action showDashboard, Action showRemote, Action sleepDisplay,
+            Action emergencyOff)
         {
             Title = "Dashboard return control";
-            Width = 510;
+            Width = screenOffEnabled ? 510 : 399;
             Height = 78;
             WindowStyle = WindowStyle.None;
             ResizeMode = ResizeMode.NoResize;
@@ -39,7 +40,7 @@ namespace ProjectorDash
             buttons.ColumnDefinitions.Add(new ColumnDefinition
                 { Width = new GridLength(96) });
             buttons.ColumnDefinitions.Add(new ColumnDefinition
-                { Width = new GridLength(104) });
+                { Width = new GridLength(screenOffEnabled ? 104 : 0) });
             buttons.ColumnDefinitions.Add(new ColumnDefinition
                 { Width = new GridLength(76) });
 
@@ -57,14 +58,17 @@ namespace ProjectorDash
             Grid.SetColumn(remote, 1);
             buttons.Children.Add(remote);
 
-            Button sleep = Ui.Btn("SCREEN OFF", 13, Ui.PanelHi, Ui.Accent,
-                delegate { if (sleepDisplay != null) sleepDisplay(); });
-            sleep.MinHeight = 56;
-            sleep.Margin = new Thickness(0, 0, 7, 0);
-            sleep.BorderBrush = Ui.Accent;
-            sleep.ToolTip = "Turn off the tablet display while audio keeps playing. Tap the screen to wake it.";
-            Grid.SetColumn(sleep, 2);
-            buttons.Children.Add(sleep);
+            if (screenOffEnabled)
+            {
+                Button sleep = Ui.Btn("SCREEN OFF", 13, Ui.PanelHi, Ui.Accent,
+                    delegate { if (sleepDisplay != null) sleepDisplay(); });
+                sleep.MinHeight = 56;
+                sleep.Margin = new Thickness(0, 0, 7, 0);
+                sleep.BorderBrush = Ui.Accent;
+                sleep.ToolTip = "Turn off the tablet display while audio keeps playing. Tap the screen to wake it.";
+                Grid.SetColumn(sleep, 2);
+                buttons.Children.Add(sleep);
+            }
 
             Button off = Ui.Btn("OFF", 16, Ui.DangerFill, Ui.DangerText,
                 delegate { if (emergencyOff != null) emergencyOff(); });
@@ -78,7 +82,8 @@ namespace ProjectorDash
             Content = card;
             SourceInitialized += delegate
             {
-                ScreenUtil.PlaceTopRightOverlay(this, tablet, 510, 78);
+                ScreenUtil.PlaceTopRightOverlay(this, tablet,
+                    screenOffEnabled ? 510 : 399, 78);
             };
         }
     }

@@ -1922,6 +1922,7 @@ namespace ProjectorDash
         {
             if (_returnOverlay != null) return;
             _returnOverlay = new ReturnOverlayWindow(tablet,
+                _cfg.TabletOnlyMode,
                 delegate { ReturnToDashboard(); },
                 delegate { OpenRemote(); },
                 delegate { SleepTabletDisplay(); },
