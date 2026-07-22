@@ -631,7 +631,7 @@ namespace ProjectorDash
             title.FontWeight = FontWeights.SemiBold;
             heading.Children.Add(title);
             TextBlock explanation = Ui.Label(
-                "The full 180° sky hemisphere, flattened to the ceiling: center is zenith (90°), every edge is horizon (0°), and the full 360° compass wraps around the center.",
+                "The live ceiling view: celestial objects use true elevation; aircraft use the selected distance range so wider searches stay readable. Bearings follow the saved heading.",
                 13, Ui.TextDim);
             heading.Children.Add(explanation);
             header.Children.Add(heading);
@@ -698,7 +698,7 @@ namespace ProjectorDash
             _overheadObjectsText.TextWrapping = TextWrapping.Wrap;
             infoStack.Children.Add(_overheadObjectsText);
             TextBlock key = Ui.Label(
-                "ACCENT  live aircraft + observed path\nAMBER  ISS + observed pass\nVIOLET  planets\nGREY  major stars\n\nEL 25° / 50° / 75° contours show elevation above the horizon; km labels show physical range. Center is zenith (90°), all edges are horizon (0°), and bearing wraps 360° around center. Aircraft use the saved range shown above. Dashed lines are reported courses; solid segments are observed movement.",
+                "ACCENT  live aircraft + observed path\nAMBER  ISS + observed pass\nVIOLET  planets\nGREY  major stars\n\nAIRCRAFT  center is 0 km and the distance ruler ends at the selected search limit, so 60 km in a 120 km view appears halfway to that limit.\n\nSKY  center is zenith (90°); all edges are horizon (0°). EL 25° / 50° / 75° contours apply to the ISS, planets, and stars. Bearings wrap 360° around center. Dashed lines are reported aircraft courses; solid segments are observed movement.",
                 12, Ui.TextDim);
             key.Margin = new Thickness(0, 18, 0, 0);
             key.TextWrapping = TextWrapping.Wrap;

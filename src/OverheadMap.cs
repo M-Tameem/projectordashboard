@@ -8,14 +8,17 @@ using System.Windows.Threading;
 namespace ProjectorDash
 {
     /// <summary>
-    /// A literal upward-looking view of the sky, seen from below like a
-    /// planisphere held overhead. There are deliberately no radar rings: the
-    /// center is the zenith and the outside of the canvas is the horizon.
-    /// Aircraft move between feed samples using their reported ADS-B track
-    /// and groundspeed.
+    /// An upward-looking ceiling view. Celestial objects use literal sky
+    /// elevation (zenith at center, horizon at the edge). Aircraft use the
+    /// selected ground-range scale instead, otherwise ordinary cruising
+    /// traffic beyond roughly 40 km collapses into the outer few pixels.
+    /// Bearings remain literal and aircraft move between feed samples using
+    /// their reported ADS-B track and groundspeed.
     /// </summary>
     public sealed class OverheadMap : FrameworkElement
     {
+        private const double AircraftRangeInset = 0.90;
+
         private double MinimumAircraftElevation
         {
             get { return _sky != null && _sky.AircraftRadiusKm > 40 ? 0.5 : 5.0; }
@@ -25,7 +28,6 @@ namespace ProjectorDash
             public DateTime AtUtc;
             public double EastKm;
             public double NorthKm;
-            public double AltitudeKm;
         }
 
         private sealed class AircraftTrack
@@ -41,7 +43,6 @@ namespace ProjectorDash
             public DateTime AnchorUtc;
             public double AnchorEastKm;
             public double AnchorNorthKm;
-            public double AltitudeKm;
             public DateTime LastReceivedUtc;
             public readonly List<TrackSample> Samples = new List<TrackSample>();
         }
@@ -137,7 +138,6 @@ namespace ProjectorDash
                 track.AnchorUtc = sampleAt;
                 track.AnchorEastKm = east;
                 track.AnchorNorthKm = north;
-                track.AltitudeKm = plane.AltitudeFeet * 0.0003048;
                 track.LastReceivedUtc = received;
 
                 bool add = track.Samples.Count == 0;
@@ -153,8 +153,7 @@ namespace ProjectorDash
                     {
                         AtUtc = sampleAt,
                         EastKm = east,
-                        NorthKm = north,
-                        AltitudeKm = track.AltitudeKm
+                        NorthKm = north
                     });
                     while (track.Samples.Count > 10) track.Samples.RemoveAt(0);
                 }
@@ -208,6 +207,7 @@ namespace ProjectorDash
             List<Rect> labels = new List<Rect>();
 
             DrawElevationContours(dc, center, radiusX, radiusY, labels);
+            DrawAircraftRangeScale(dc, center, radiusX, labels);
             DrawOrientation(dc, width, height, labels);
             DrawZenith(dc, center);
             labels.Add(new Rect(center.X - 62, center.Y - 16, 124, 64));
@@ -258,7 +258,7 @@ namespace ProjectorDash
             });
             labelPriority.Sort(delegate(PlaneReading a, PlaneReading b)
             {
-                return ViewingElevation(b).CompareTo(ViewingElevation(a));
+                return a.DistanceKm.CompareTo(b.DistanceKm);
             });
             HashSet<string> labeled = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             int labelLimit = Math.Min(6, labelPriority.Count);
@@ -391,6 +391,43 @@ namespace ProjectorDash
             }
         }
 
+        private void DrawAircraftRangeScale(DrawingContext dc, Point center,
+            double radiusX, List<Rect> labels)
+        {
+            int rangeKm = Math.Max(20, _aircraftRadiusKm);
+            double endX = center.X + radiusX * AircraftRangeInset;
+            double startX = center.X + 68.0;
+            if (endX - startX < 135.0) return;
+
+            Pen pen = new Pen(Ui.AircraftCourse, 0.9);
+            pen.DashStyle = new DashStyle(new double[] { 2, 6 }, 0);
+            dc.DrawLine(pen, new Point(startX, center.Y),
+                new Point(endX, center.Y));
+
+            FormattedText heading = Format("AIRCRAFT DISTANCE", 8,
+                Ui.MapGridText, true);
+            Point headingPoint = new Point(startX, center.Y - heading.Height - 3.0);
+            dc.DrawText(heading, headingPoint);
+            labels.Add(new Rect(headingPoint.X - 2, headingPoint.Y - 1,
+                heading.Width + 4, heading.Height + 2));
+
+            double[] fractions = new double[] { 0.25, 0.50, 0.75, 1.0 };
+            Pen tickPen = new Pen(Ui.MapGridText, 0.8);
+            foreach (double fraction in fractions)
+            {
+                double x = center.X + radiusX * AircraftRangeInset * fraction;
+                dc.DrawLine(tickPen,
+                    new Point(x, center.Y - 4), new Point(x, center.Y + 4));
+                string text = Math.Round(rangeKm * fraction).ToString("0") + " KM";
+                if (fraction >= 0.999) text += " LIMIT";
+                FormattedText formatted = Format(text, 8, Ui.MapGridText, false);
+                Point position = new Point(x - formatted.Width / 2.0, center.Y + 6.0);
+                dc.DrawText(formatted, position);
+                labels.Add(new Rect(position.X - 2, position.Y - 1,
+                    formatted.Width + 4, formatted.Height + 2));
+            }
+        }
+
         private void DrawCornerBearing(DrawingContext dc, Point point,
             double bearing, bool right, List<Rect> labels)
         {
@@ -446,10 +483,9 @@ namespace ProjectorDash
 
             List<Point> observed = new List<Point>();
             foreach (TrackSample sample in track.Samples)
-                observed.Add(PositionPoint(center, radiusX, radiusY,
-                    sample.EastKm, sample.NorthKm, sample.AltitudeKm));
-            Point current = PositionPoint(center, radiusX, radiusY,
-                east, north, track.AltitudeKm);
+                observed.Add(AircraftPoint(center, radiusX, radiusY,
+                    sample.EastKm, sample.NorthKm));
+            Point current = AircraftPoint(center, radiusX, radiusY, east, north);
             if (observed.Count == 0 || Distance(observed[observed.Count - 1].X,
                 observed[observed.Count - 1].Y, current.X, current.Y) > 1.0)
                 observed.Add(current);
@@ -473,9 +509,9 @@ namespace ProjectorDash
             Point directionPoint = current;
             if (track.HasTrack && track.SpeedKnots > 20.0)
             {
-                directionPoint = PositionPoint(center, radiusX, radiusY,
+                directionPoint = AircraftPoint(center, radiusX, radiusY,
                     east + velocityEast * 10.0,
-                    north + velocityNorth * 10.0, track.AltitudeKm);
+                    north + velocityNorth * 10.0);
                 if (showLabel) DrawCourseLine(dc, center, radiusX, radiusY,
                     current, directionPoint);
             }
@@ -646,15 +682,15 @@ namespace ProjectorDash
                 plane.AltitudeFeet);
         }
 
-        private Point PositionPoint(Point center, double radiusX, double radiusY,
-            double eastKm, double northKm, double altitudeKm)
+        private Point AircraftPoint(Point center, double radiusX, double radiusY,
+            double eastKm, double northKm)
         {
             double distanceKm = Math.Sqrt(eastKm * eastKm + northKm * northKm);
             double bearing = Math.Atan2(eastKm, northKm) * 180.0 / Math.PI;
             if (bearing < 0) bearing += 360.0;
-            double elevation = AmbientService.AircraftElevationDegrees(distanceKm,
-                altitudeKm / 0.0003048);
-            return SkyPoint(center, radiusX, radiusY, bearing, elevation);
+            double rangeKm = Math.Max(20.0, _aircraftRadiusKm);
+            return BearingPoint(center, radiusX, radiusY, bearing,
+                distanceKm / rangeKm * AircraftRangeInset);
         }
 
         private Point SkyPoint(Point center, double radiusX, double radiusY,
@@ -665,6 +701,12 @@ namespace ProjectorDash
             // horizon is the edge. At 50 degrees elevation an object therefore
             // sits cos(50 degrees), or 64%, of the way out—not near the zenith.
             double distance = Math.Cos(altitude * Math.PI / 180.0);
+            return BearingPoint(center, radiusX, radiusY, bearing, distance);
+        }
+
+        private Point BearingPoint(Point center, double radiusX, double radiusY,
+            double bearing, double distance)
+        {
             double angle = (bearing - _facingDegrees) * Math.PI / 180.0;
             // Looking up mirrors east/west relative to a conventional map:
             // with north at the top, east belongs on the viewer's left.
@@ -693,8 +735,7 @@ namespace ProjectorDash
                 double course = track.TrackDegrees * Math.PI / 180.0;
                 double east = track.AnchorEastKm + speed * Math.Sin(course) * elapsed;
                 double north = track.AnchorNorthKm + speed * Math.Cos(course) * elapsed;
-                Point aircraft = PositionPoint(center, radiusX, radiusY,
-                    east, north, track.AltitudeKm);
+                Point aircraft = AircraftPoint(center, radiusX, radiusY, east, north);
                 if (Distance(point.X, point.Y, aircraft.X, aircraft.Y) < 32.0)
                     return true;
             }
