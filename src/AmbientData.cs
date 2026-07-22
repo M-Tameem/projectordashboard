@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Net;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 
@@ -99,6 +100,7 @@ namespace ProjectorDash
         public double ObserverLatitude;
         public double ObserverLongitude;
         public int AircraftRadiusKm = 40;
+        public bool ExternalFeedsEnabled = true;
     }
 
     /// <summary>
@@ -182,17 +184,36 @@ namespace ProjectorDash
         public static async Task<SkyReading> GetSkyAsync(double latitude, double longitude,
             int aircraftRadiusKm)
         {
+            return await GetSkyAsync(latitude, longitude, aircraftRadiusKm,
+                CancellationToken.None);
+        }
+
+        public static SkyReading GetLocalSky(double latitude, double longitude,
+            int aircraftRadiusKm)
+        {
             aircraftRadiusKm = AppConfig.NormalizeAircraftRadius(aircraftRadiusKm);
             SkyReading result = new SkyReading();
             result.ObserverLatitude = latitude;
             result.ObserverLongitude = longitude;
             result.AircraftRadiusKm = aircraftRadiusKm;
+            result.ExternalFeedsEnabled = false;
             result.Planets.AddRange(CalculatePlanets(DateTime.UtcNow, latitude, longitude));
             result.Stars.AddRange(CalculateStars(DateTime.UtcNow, latitude, longitude));
+            result.UpdatedUtc = DateTime.UtcNow;
+            return result;
+        }
+
+        public static async Task<SkyReading> GetSkyAsync(double latitude, double longitude,
+            int aircraftRadiusKm, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            aircraftRadiusKm = AppConfig.NormalizeAircraftRadius(aircraftRadiusKm);
+            SkyReading result = GetLocalSky(latitude, longitude, aircraftRadiusKm);
+            result.ExternalFeedsEnabled = true;
 
             Task<PlaneFeedResult> planes = GetPlanesAsync(latitude, longitude,
-                aircraftRadiusKm);
-            Task<IssReading> iss = GetIssAsync(latitude, longitude);
+                aircraftRadiusKm, cancellationToken);
+            Task<IssReading> iss = GetIssAsync(latitude, longitude, cancellationToken);
             try
             {
                 PlaneFeedResult feed = await planes;
@@ -202,6 +223,7 @@ namespace ProjectorDash
             }
             catch (Exception ex)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 result.AircraftFeedAvailable = false;
                 result.AircraftError = DescribeNetworkError(ex);
             }
@@ -212,9 +234,11 @@ namespace ProjectorDash
             }
             catch
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 result.Iss = new IssReading();
                 result.IssFeedAvailable = false;
             }
+            cancellationToken.ThrowIfCancellationRequested();
             result.UpdatedUtc = DateTime.UtcNow;
             return result;
         }
@@ -226,7 +250,8 @@ namespace ProjectorDash
         }
 
         private static async Task<PlaneFeedResult> GetPlanesAsync(
-            double latitude, double longitude, int radiusKm)
+            double latitude, double longitude, int radiusKm,
+            CancellationToken cancellationToken)
         {
             string lat = latitude.ToString("0.#####", CultureInfo.InvariantCulture);
             string lon = longitude.ToString("0.#####", CultureInfo.InvariantCulture);
@@ -240,10 +265,15 @@ namespace ProjectorDash
                 PlaneFeedResult primary = new PlaneFeedResult();
                 primary.Name = "adsb.lol";
                 primary.Planes = await GetPlanesFromAsync(
-                    "https://api.adsb.lol" + suffix, latitude, longitude, radiusKm);
+                    "https://api.adsb.lol" + suffix, latitude, longitude, radiusKm,
+                    cancellationToken);
                 return primary;
             }
-            catch (Exception ex) { primaryError = ex; }
+            catch (Exception ex)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                primaryError = ex;
+            }
 
             List<PlaneReading> cached = GetCachedFallbackPlanes(latitude, longitude,
                 radiusKm);
@@ -261,12 +291,14 @@ namespace ProjectorDash
                 PlaneFeedResult fallback = new PlaneFeedResult();
                 fallback.Name = "airplanes.live fallback · quota-safe 3 min sync";
                 fallback.Planes = await GetPlanesFromAsync(
-                    "https://api.airplanes.live" + suffix, latitude, longitude, radiusKm);
+                    "https://api.airplanes.live" + suffix, latitude, longitude, radiusKm,
+                    cancellationToken);
                 StoreFallbackPlanes(fallback.Planes, latitude, longitude, radiusKm);
                 return fallback;
             }
             catch (Exception fallbackError)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 throw new InvalidOperationException("adsb.lol " +
                     DescribeNetworkError(primaryError) + "; airplanes.live " +
                     DescribeNetworkError(fallbackError), fallbackError);
@@ -327,9 +359,11 @@ namespace ProjectorDash
         }
 
         private static async Task<List<PlaneReading>> GetPlanesFromAsync(
-            string url, double latitude, double longitude, int radiusKm)
+            string url, double latitude, double longitude, int radiusKm,
+            CancellationToken cancellationToken)
         {
-            Dictionary<string, object> root = AsObject(await DownloadAsync(url));
+            Dictionary<string, object> root = AsObject(await DownloadAsync(
+                url, cancellationToken));
             object raw;
             List<PlaneReading> result = new List<PlaneReading>();
             if (!root.TryGetValue("ac", out raw)) return result;
@@ -412,10 +446,10 @@ namespace ProjectorDash
         }
 
         private static async Task<IssReading> GetIssAsync(
-            double latitude, double longitude)
+            double latitude, double longitude, CancellationToken cancellationToken)
         {
             Dictionary<string, object> root = AsObject(await DownloadAsync(
-                "https://api.wheretheiss.at/v1/satellites/25544"));
+                "https://api.wheretheiss.at/v1/satellites/25544", cancellationToken));
             double issLat = NumberValue(root, "latitude");
             double issLon = NumberValue(root, "longitude");
             double issAltitude = NumberValue(root, "altitude");
@@ -748,13 +782,35 @@ namespace ProjectorDash
 
         private static async Task<string> DownloadAsync(string url)
         {
+            return await DownloadAsync(url, CancellationToken.None);
+        }
+
+        private static async Task<string> DownloadAsync(string url,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
             ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072; // TLS 1.2 on .NET 4.5
             using (WebClient client = new TimeoutWebClient())
             {
                 client.Encoding = System.Text.Encoding.UTF8;
                 client.Headers[HttpRequestHeader.UserAgent] =
                     "ProjectorDashboard/" + SelfUpdater.CurrentVersion;
-                return await client.DownloadStringTaskAsync(new Uri(url)).ConfigureAwait(false);
+                using (CancellationTokenRegistration registration =
+                    cancellationToken.Register(client.CancelAsync))
+                {
+                    try
+                    {
+                        string response = await client.DownloadStringTaskAsync(
+                            new Uri(url)).ConfigureAwait(false);
+                        cancellationToken.ThrowIfCancellationRequested();
+                        return response;
+                    }
+                    catch (WebException)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        throw;
+                    }
+                }
             }
         }
 

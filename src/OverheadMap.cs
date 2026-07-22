@@ -89,13 +89,21 @@ namespace ProjectorDash
             _facingDegrees = Normalize(facingDegrees);
             if (sky != null)
             {
+                if (!sky.ExternalFeedsEnabled)
+                {
+                    _tracks.Clear();
+                    _issTrail.Clear();
+                }
                 if (sky.AircraftRadiusKm != _aircraftRadiusKm)
                 {
                     _tracks.Clear();
                     _aircraftRadiusKm = sky.AircraftRadiusKm;
                 }
-                RecordAircraft(sky);
-                RecordIss(sky);
+                if (sky.ExternalFeedsEnabled)
+                {
+                    RecordAircraft(sky);
+                    RecordIss(sky);
+                }
                 _livePlanets = new List<PlanetReading>(sky.Planets);
                 _liveStars = new List<StarReading>(sky.Stars);
                 _celestialUpdatedUtc = sky.UpdatedUtc;

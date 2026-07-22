@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -25,6 +26,7 @@ namespace ProjectorDash
         private readonly AudioEndpoint _audio;
         private readonly BrightnessControl _brightness;
         private ProjectorWindow _projector;
+        private ProjectorDimmerWindow _projectorDimmer;
         private ReturnOverlayWindow _returnOverlay;
         private MirrorWindow _fullscreenMirror;
         private readonly DwmWindowMirror _previewMirror = new DwmWindowMirror();
@@ -47,6 +49,8 @@ namespace ProjectorDash
         private DateTime _nextSkyRefreshUtc = DateTime.MinValue;
         private bool _weatherRefreshBusy;
         private bool _skyRefreshBusy;
+        private CancellationTokenSource _skyRefreshCancellation;
+        private int _skyRefreshGeneration;
 
         // Layout pieces that depend on config / DPI
         private RowDefinition _bottomRow;
@@ -62,6 +66,8 @@ namespace ProjectorDash
         private Button _audioDeviceBtn;
         private TouchSlider _briSlider;
         private TextBlock _briValueText;
+        private TouchSlider _projectorBriSlider;
+        private TextBlock _projectorBriValueText;
         private Button _sleepBtn;
         private Button _autoLockBtn;
         private Button _previewBtn;
@@ -84,6 +90,7 @@ namespace ProjectorDash
         private TextBlock _weatherMetaText;
         private TextBlock _sunriseText;
         private TextBlock _skyCountText;
+        private TextBlock _skyModeText;
         private TextBlock _aircraftSourceText;
         private TextBlock _aircraftText;
         private TextBlock _orbitText;
@@ -93,6 +100,8 @@ namespace ProjectorDash
         private TextBlock _overheadObjectsText;
         private TextBlock _overheadUpdatedText;
         private Button _ceilingMapBtn;
+        private Button _skyNetworkBtn;
+        private Button _ambientSkyNetworkBtn;
         private bool _projectorOverhead;
         private bool _overheadRestoresApp;
 
@@ -189,6 +198,7 @@ namespace ProjectorDash
             SyncAudioUi();
             SyncBrightnessUi();
             OpenProjectorWindow();
+            SyncProjectorBrightnessUi();
             UpdateAlarmUi();
             UpdateAutoLockUi();
             ApplyAmbientUi();
@@ -204,6 +214,8 @@ namespace ProjectorDash
         private void OnClosedExit(object sender, EventArgs e)
         {
             // Requirement: closing the controller exits the whole app.
+            CancelSkyRefresh();
+            _cfg.Save();
             if (_clockTimer != null) _clockTimer.Stop();
             if (_alarmSoundTimer != null) _alarmSoundTimer.Stop();
             if (_alarmAudioState != null)
@@ -215,6 +227,11 @@ namespace ProjectorDash
             if (_projector != null)
             {
                 try { _projector.Close(); }
+                catch { }
+            }
+            if (_projectorDimmer != null)
+            {
+                try { _projectorDimmer.Close(); }
                 catch { }
             }
             if (_returnOverlay != null)
@@ -243,6 +260,8 @@ namespace ProjectorDash
             if (proj == null) return;
             _projector = new ProjectorWindow(proj, _cfg.ProjectorMode);
             _projector.Show();
+            _projectorDimmer = new ProjectorDimmerWindow(proj);
+            _projectorDimmer.SetBrightness(_cfg.ProjectorBrightnessPercent);
             ApplyAmbientUi();
             Activate(); // keep touch focus on the controller
         }
@@ -293,6 +312,12 @@ namespace ProjectorDash
             if (_powerPopup != null) _powerPopup.IsOpen = false;
             if (_aircraftRangePopup != null) _aircraftRangePopup.IsOpen = false;
             _previewMirror.Detach();
+            if (_projectorDimmer != null)
+            {
+                try { _projectorDimmer.Close(); }
+                catch { }
+                _projectorDimmer = null;
+            }
             if (_projector != null)
             {
                 try { _projector.Close(); }
@@ -310,6 +335,7 @@ namespace ProjectorDash
             UpdateAutoLockUi();
             PopulateAmbientEditor();
             OpenProjectorWindow();
+            SyncProjectorBrightnessUi();
             if (_projector != null && _projectorOverhead)
             {
                 _projector.ShowOverhead(true);
@@ -477,10 +503,11 @@ namespace ProjectorDash
             Grid.SetColumnSpan(_overheadOverlay, 2);
             root.Children.Add(_overheadOverlay);
 
-            // --- Bottom-left: volume + brightness --------------------------
+            // --- Bottom-left: volume + tablet/projector brightness --------
             Grid controls = new Grid();
             controls.Margin = new Thickness(28, 10, 20, 24);
             controls.VerticalAlignment = VerticalAlignment.Bottom;
+            controls.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             controls.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             controls.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 
@@ -488,6 +515,9 @@ namespace ProjectorDash
             UIElement bri = BuildBrightnessRow();
             Grid.SetRow(bri, 1);
             controls.Children.Add(bri);
+            UIElement projectorBri = BuildProjectorBrightnessRow();
+            Grid.SetRow(projectorBri, 2);
+            controls.Children.Add(projectorBri);
 
             Grid.SetRow(controls, 2);
             Grid.SetColumn(controls, 0);
@@ -552,9 +582,9 @@ namespace ProjectorDash
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
             StackPanel status = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
-            TextBlock mark = Ui.Label("OVERHEAD  /  LIVE", 11, Ui.Accent);
-            mark.FontWeight = FontWeights.SemiBold;
-            status.Children.Add(mark);
+            _skyModeText = Ui.Label("OVERHEAD  /  LIVE", 11, Ui.Accent);
+            _skyModeText.FontWeight = FontWeights.SemiBold;
+            status.Children.Add(_skyModeText);
             _skyCountText = Ui.Label("SET LOCATION", 15, Ui.Text);
             _skyCountText.FontWeight = FontWeights.SemiBold;
             status.Children.Add(_skyCountText);
@@ -599,6 +629,15 @@ namespace ProjectorDash
             _aircraftRangeBtn.Padding = new Thickness(12, 6, 12, 6);
             _aircraftRangeBtn.Margin = new Thickness(0, 0, 8, 0);
             actions.Children.Add(_aircraftRangeBtn);
+            _skyNetworkBtn = Ui.Btn("LIVE DATA ON", 12, Ui.AccentDim, Ui.Accent,
+                delegate { ToggleSkyNetwork(); });
+            _skyNetworkBtn.Height = 46;
+            _skyNetworkBtn.MinHeight = 46;
+            _skyNetworkBtn.Padding = new Thickness(12, 6, 12, 6);
+            _skyNetworkBtn.Margin = new Thickness(0, 0, 8, 0);
+            _skyNetworkBtn.ToolTip =
+                "Stops or resumes Sky Now aircraft and ISS requests. Weather is separate; planets and stars stay local.";
+            actions.Children.Add(_skyNetworkBtn);
             _mainOverheadBtn = Ui.Btn("PROJECT SKY", 13, Ui.Accent, Ui.Ink,
                 delegate { ToggleOverheadFromMain(); });
             _mainOverheadBtn.Height = 46;
@@ -610,6 +649,7 @@ namespace ProjectorDash
             grid.Children.Add(actions);
 
             _aircraftRangePopup = BuildAircraftRangePopup(_aircraftRangeBtn);
+            UpdateSkyNetworkButtons();
             card.Child = grid;
             return card;
         }
@@ -1053,6 +1093,7 @@ namespace ProjectorDash
         private UIElement BuildBrightnessRow()
         {
             Grid row = new Grid();
+            row.Margin = new Thickness(0, 0, 0, 10);
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(150) });
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -1080,6 +1121,50 @@ namespace ProjectorDash
             row.Children.Add(_briValueText);
 
             if (!_brightness.Available) row.Visibility = Visibility.Collapsed;
+            return row;
+        }
+
+        private UIElement BuildProjectorBrightnessRow()
+        {
+            Grid row = new Grid();
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(150) });
+            row.ColumnDefinitions.Add(new ColumnDefinition
+                { Width = new GridLength(1, GridUnitType.Star) });
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+            TextBlock label = Ui.Label("Projector brightness", 17, Ui.TextDim);
+            label.VerticalAlignment = VerticalAlignment.Center;
+            row.Children.Add(label);
+
+            _projectorBriSlider = new TouchSlider();
+            _projectorBriSlider.ValueChanged += delegate(int v)
+            {
+                if (_suppressSliderEvents) return;
+                _cfg.ProjectorBrightnessPercent = AppConfig.NormalizePercent(v);
+                if (_projectorDimmer != null)
+                    _projectorDimmer.SetBrightness(_cfg.ProjectorBrightnessPercent);
+                if (_projectorBriValueText != null)
+                    _projectorBriValueText.Text =
+                        _cfg.ProjectorBrightnessPercent.ToString() + "% · image dimmer";
+            };
+            _projectorBriSlider.MouseLeftButtonUp += delegate
+            {
+                _cfg.Save();
+            };
+            _projectorBriSlider.ToolTip =
+                "Dims every projected window without intercepting input. This does not change the projector lamp or LED power.";
+            Grid.SetColumn(_projectorBriSlider, 1);
+            row.Children.Add(_projectorBriSlider);
+
+            _projectorBriValueText = Ui.Label("", 16, Ui.TextDim);
+            _projectorBriValueText.Width = 214;
+            _projectorBriValueText.Margin = new Thickness(14, 0, 0, 0);
+            _projectorBriValueText.VerticalAlignment = VerticalAlignment.Center;
+            Grid.SetColumn(_projectorBriValueText, 2);
+            row.Children.Add(_projectorBriValueText);
+
+            if (_cfg.TabletOnlyMode || string.IsNullOrEmpty(_cfg.ProjectorDevice))
+                row.Visibility = Visibility.Collapsed;
             return row;
         }
 
@@ -1119,6 +1204,20 @@ namespace ProjectorDash
             _briSlider.Value = b;
             _suppressSliderEvents = false;
             if (_briValueText != null) _briValueText.Text = b.ToString() + "% · tablet only";
+        }
+
+        private void SyncProjectorBrightnessUi()
+        {
+            if (_projectorBriSlider == null) return;
+            int brightness = AppConfig.NormalizePercent(
+                _cfg.ProjectorBrightnessPercent);
+            _suppressSliderEvents = true;
+            _projectorBriSlider.Value = brightness;
+            _suppressSliderEvents = false;
+            if (_projectorBriValueText != null)
+                _projectorBriValueText.Text = brightness.ToString() + "% · image dimmer";
+            if (_projectorDimmer != null)
+                _projectorDimmer.SetBrightness(brightness);
         }
 
         // ------------------------------------------------------------------
@@ -1374,6 +1473,7 @@ namespace ProjectorDash
         {
             if (_overheadMap == null) return;
             UpdateAircraftRangeUi();
+            UpdateSkyNetworkButtons();
             _overheadMap.SetData(_sky, _cfg.FacingDegrees);
             if (_projector != null && _projectorOverhead)
                 _projector.UpdateOverhead(_sky, _cfg.FacingDegrees);
@@ -1410,15 +1510,31 @@ namespace ProjectorDash
                 return;
             }
 
-            _overheadFeedText.Text = _sky.AircraftFeedAvailable
-                ? (OverheadAircraftCount().ToString() + " overhead · " +
-                    _sky.Planes.Count.ToString() + " within " +
-                    _cfg.AircraftRadiusKm.ToString() + " km · " +
-                    (_sky.AircraftFeedName.Length == 0 ? "live ADS-B" : _sky.AircraftFeedName))
-                : ("Aircraft feeds offline\n" + _sky.AircraftError);
-            _overheadFeedText.Foreground = _sky.AircraftFeedAvailable ? Ui.Text : Ui.Danger;
-            _overheadUpdatedText.Text = "Updated " + _sky.UpdatedUtc.ToLocalTime().ToString("h:mm:ss tt") +
-                " · markers move continuously · data sync " + SkyRefreshSeconds().ToString() + " sec";
+            bool externalFeedsEnabled = _cfg.SkyNetworkEnabled &&
+                _sky.ExternalFeedsEnabled;
+            if (!externalFeedsEnabled)
+            {
+                _overheadFeedText.Text =
+                    "Aircraft and ISS network requests are off · local sky only";
+                _overheadFeedText.Foreground = Ui.TextDim;
+                _overheadUpdatedText.Text =
+                    "No Sky Now API polling · planets and stars follow the local clock";
+            }
+            else
+            {
+                _overheadFeedText.Text = _sky.AircraftFeedAvailable
+                    ? (OverheadAircraftCount().ToString() + " overhead · " +
+                        _sky.Planes.Count.ToString() + " within " +
+                        _cfg.AircraftRadiusKm.ToString() + " km · " +
+                        (_sky.AircraftFeedName.Length == 0 ? "live ADS-B" : _sky.AircraftFeedName))
+                    : ("Aircraft feeds offline\n" + _sky.AircraftError);
+                _overheadFeedText.Foreground = _sky.AircraftFeedAvailable
+                    ? Ui.Text : Ui.Danger;
+                _overheadUpdatedText.Text = "Updated " +
+                    _sky.UpdatedUtc.ToLocalTime().ToString("h:mm:ss tt") +
+                    " · markers move continuously · data sync " +
+                    SkyRefreshSeconds().ToString() + " sec";
+            }
 
             List<string> objects = new List<string>();
             int planeDetails = 0;
@@ -1448,7 +1564,7 @@ namespace ProjectorDash
             if (overheadCount > planeDetails)
                 objects.Add("+ " + (overheadCount - planeDetails).ToString() +
                     " more aircraft plotted on the live view");
-            if (_sky.Iss.Available)
+            if (externalFeedsEnabled && _sky.Iss.Available)
                 objects.Add(_sky.Iss.AboveHorizon
                     ? "ISS / NORAD 25544 · " + Math.Round(_sky.Iss.ElevationDegrees).ToString("0") +
                         "° above horizon · " + AmbientService.Direction(_sky.Iss.BearingDegrees,
@@ -2200,8 +2316,10 @@ namespace ProjectorDash
             sizeRow.Children.Add(apply);
             right.Children.Add(sizeRow);
             right.Children.Add(WrappedNote(_brightness.Available
-                ? "Tablet brightness controls only the built-in tablet backlight; projector brightness must be changed on the projector."
-                : "Windows does not expose tablet backlight control on this device, so the dashboard hides that slider."));
+                ? "Tablet brightness controls the built-in backlight. Projector brightness uses a saved click-through image dimmer that remains above projected apps without blocking input."
+                : "Windows does not expose tablet backlight control on this device, so that slider is hidden. The projector image dimmer remains available in two-screen mode."));
+            right.Children.Add(WrappedNote(
+                "The projector dimmer lowers visible output in software; it does not reduce the projector lamp/LED power or replace the projector's own eco mode."));
             Button displays = SmallBtn("Reassign displays", delegate { ReassignDisplays(); });
             displays.Margin = new Thickness(0, 10, 0, 0);
             right.Children.Add(displays);
@@ -2353,11 +2471,16 @@ namespace ProjectorDash
             };
             _temperatureUnitBtn = SmallBtn("Units: °C", delegate { ToggleTemperatureUnit(); });
             choices.Children.Add(_temperatureUnitBtn);
+            _ambientSkyNetworkBtn = SmallBtn("Sky feeds: On",
+                delegate { ToggleSkyNetwork(); });
+            _ambientSkyNetworkBtn.ToolTip =
+                "Stops or resumes aircraft and ISS network requests. Local planet/star calculations remain on.";
+            choices.Children.Add(_ambientSkyNetworkBtn);
             Button refresh = SmallBtn("Refresh now", delegate { StartAmbientRefresh(true); });
             choices.Children.Add(refresh);
             right.Children.Add(choices);
             right.Children.Add(WrappedNote(
-                "Planet positions are calculated locally from JPL orbital elements. Bearings are true-north compass directions; cloud and daylight can still hide an object."));
+                "Sky feeds controls only ADS-B aircraft and ISS requests. Weather remains on its normal 15-minute schedule; planet and star positions are calculated locally. Bearings are true-north compass directions; cloud and daylight can still hide an object."));
             Grid.SetColumn(right, 2);
             page.Children.Add(right);
             return page;
@@ -2450,6 +2573,7 @@ namespace ProjectorDash
                 _editFacingDegrees.Text = _cfg.FacingDegrees.ToString(CultureInfo.InvariantCulture);
             if (_temperatureUnitBtn != null)
                 _temperatureUnitBtn.Content = _cfg.UseFahrenheit ? "Units: °F" : "Units: °C";
+            UpdateSkyNetworkButtons();
             if (_locationStatus != null)
             {
                 _locationStatus.Text = _cfg.LocationConfigured
@@ -2553,6 +2677,75 @@ namespace ProjectorDash
             StartAmbientRefresh(true);
         }
 
+        private void ToggleSkyNetwork()
+        {
+            _cfg.SkyNetworkEnabled = !_cfg.SkyNetworkEnabled;
+            _cfg.Save();
+            CancelSkyRefresh();
+            _nextSkyRefreshUtc = _cfg.SkyNetworkEnabled
+                ? DateTime.MinValue : DateTime.MaxValue;
+            if (_cfg.LocationConfigured)
+            {
+                if (_cfg.SkyNetworkEnabled)
+                {
+                    _sky = null;
+                    ApplyAmbientUi();
+                    RefreshSky();
+                }
+                else
+                {
+                    _sky = AmbientService.GetLocalSky(_cfg.Latitude, _cfg.Longitude,
+                        _cfg.AircraftRadiusKm);
+                    ApplyAmbientUi();
+                }
+            }
+            UpdateSkyNetworkButtons();
+        }
+
+        private void UpdateSkyNetworkButtons()
+        {
+            bool enabled = _cfg.SkyNetworkEnabled;
+            if (_skyModeText != null)
+                _skyModeText.Text = enabled ? "OVERHEAD  /  LIVE" : "OVERHEAD  /  LOCAL ONLY";
+            if (_skyNetworkBtn != null)
+            {
+                _skyNetworkBtn.Content = enabled ? "LIVE DATA ON" : "LIVE DATA OFF";
+                _skyNetworkBtn.Background = enabled ? Ui.AccentDim : Ui.PanelHi;
+                _skyNetworkBtn.Foreground = enabled ? Ui.Accent : Ui.TextDim;
+                _skyNetworkBtn.BorderBrush = enabled ? Ui.Accent : Ui.Line;
+            }
+            if (_ambientSkyNetworkBtn != null)
+            {
+                _ambientSkyNetworkBtn.Content = enabled
+                    ? "Sky feeds: On" : "Sky feeds: Off";
+                _ambientSkyNetworkBtn.Background = enabled ? Ui.AccentDim : Ui.Panel;
+                _ambientSkyNetworkBtn.Foreground = enabled ? Ui.Accent : Ui.TextDim;
+            }
+            if (_aircraftRangeBtn != null)
+            {
+                _aircraftRangeBtn.IsEnabled = enabled;
+                _aircraftRangeBtn.Opacity = enabled ? 1.0 : 0.45;
+            }
+            if (_overheadRangeBtn != null)
+            {
+                _overheadRangeBtn.IsEnabled = enabled;
+                _overheadRangeBtn.Opacity = enabled ? 1.0 : 0.45;
+            }
+        }
+
+        private void CancelSkyRefresh()
+        {
+            _skyRefreshGeneration++;
+            if (_skyRefreshCancellation != null)
+            {
+                try { _skyRefreshCancellation.Cancel(); }
+                catch { }
+                _skyRefreshCancellation.Dispose();
+                _skyRefreshCancellation = null;
+            }
+            _skyRefreshBusy = false;
+        }
+
         private void StartAmbientRefresh(bool immediate)
         {
             if (!_cfg.LocationConfigured)
@@ -2605,14 +2798,31 @@ namespace ProjectorDash
         private void RefreshSky()
         {
             if (!_cfg.LocationConfigured || _skyRefreshBusy) return;
+            if (!_cfg.SkyNetworkEnabled)
+            {
+                _nextSkyRefreshUtc = DateTime.MaxValue;
+                _sky = AmbientService.GetLocalSky(_cfg.Latitude, _cfg.Longitude,
+                    _cfg.AircraftRadiusKm);
+                ApplyAmbientUi();
+                return;
+            }
             _skyRefreshBusy = true;
             _nextSkyRefreshUtc = DateTime.UtcNow.AddSeconds(SkyRefreshSeconds());
             int requestedRadiusKm = _cfg.AircraftRadiusKm;
+            CancellationTokenSource cancellation = new CancellationTokenSource();
+            _skyRefreshCancellation = cancellation;
+            int generation = ++_skyRefreshGeneration;
             AmbientService.GetSkyAsync(_cfg.Latitude, _cfg.Longitude,
-                requestedRadiusKm).ContinueWith(
+                requestedRadiusKm, cancellation.Token).ContinueWith(
                 delegate(Task<SkyReading> task)
                 {
+                    if (generation != _skyRefreshGeneration) return;
                     _skyRefreshBusy = false;
+                    if (_skyRefreshCancellation == cancellation)
+                    {
+                        _skyRefreshCancellation.Dispose();
+                        _skyRefreshCancellation = null;
+                    }
                     if (!task.IsCanceled && !task.IsFaulted &&
                         task.Result.AircraftRadiusKm == _cfg.AircraftRadiusKm)
                         _sky = task.Result;
@@ -2682,7 +2892,15 @@ namespace ProjectorDash
                 return;
             }
 
-            if (!_sky.AircraftFeedAvailable)
+            if (!_cfg.SkyNetworkEnabled || !_sky.ExternalFeedsEnabled)
+            {
+                _skyCountText.Text = "LIVE DATA OFF";
+                if (_aircraftSourceText != null)
+                    _aircraftSourceText.Text = "AIR TRAFFIC  /  REQUESTS DISABLED";
+                _aircraftText.Text =
+                    "No Sky Now network polling · use LIVE DATA OFF to resume";
+            }
+            else if (!_sky.AircraftFeedAvailable)
             {
                 _skyCountText.Text = "FEED OFFLINE";
                 if (_aircraftSourceText != null)
@@ -2715,7 +2933,11 @@ namespace ProjectorDash
             }
 
             List<string> orbit = new List<string>();
-            if (_sky.Iss.Available)
+            if (!_cfg.SkyNetworkEnabled || !_sky.ExternalFeedsEnabled)
+            {
+                orbit.Add("ISS feed disabled");
+            }
+            else if (_sky.Iss.Available)
             {
                 orbit.Add(_sky.Iss.AboveHorizon
                     ? "ISS " + Math.Round(_sky.Iss.ElevationDegrees).ToString("0") + "° " +
@@ -2744,10 +2966,12 @@ namespace ProjectorDash
 
             if (_projector != null)
             {
-                string planes = _sky.AircraftFeedAvailable
+                string planes = (!_cfg.SkyNetworkEnabled || !_sky.ExternalFeedsEnabled)
+                    ? "Live aircraft + ISS feeds off"
+                    : (_sky.AircraftFeedAvailable
                     ? (_sky.Planes.Count == 0 ? "No nearby aircraft" :
                         _sky.Planes.Count.ToString() + " aircraft nearby")
-                    : "Aircraft feed offline";
+                    : "Aircraft feed offline");
                 _projector.UpdateSky(planes + "  ·  " + string.Join("  ·  ", orbit.ToArray()));
             }
             UpdateOverheadUi();

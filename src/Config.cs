@@ -74,11 +74,20 @@ namespace ProjectorDash
         public int FacingDegrees = 0;
         public bool UseFahrenheit = false;
 
+        // Master switch for Sky Now's remote aircraft and ISS feeds. Local
+        // planet/star calculations remain available while this is disabled.
+        public bool SkyNetworkEnabled = true;
+
         // Whole-app color palette and the saved radius used for free ADS-B
         // point queries. Radius changes are applied explicitly by the UI so
         // tapping +/- never burns requests while the user is deciding.
         public string ColorTheme = "Cyan";
         public int AircraftRadiusKm = 40;
+
+        // Perceived projector brightness. This drives the dashboard's
+        // click-through dimmer because ordinary HDMI output does not expose a
+        // portable hardware-brightness API for projectors.
+        public int ProjectorBrightnessPercent = 100;
 
         // How launched shortcuts occupy the projector. Fullscreen removes the
         // normal window frame; false keeps the frame and maximizes the window.
@@ -202,6 +211,13 @@ namespace ProjectorDash
                         cfg.AircraftRadiusKm = aircraftRadius;
                         changed = true;
                     }
+                    int projectorBrightness = NormalizePercent(
+                        cfg.ProjectorBrightnessPercent);
+                    if (projectorBrightness != cfg.ProjectorBrightnessPercent)
+                    {
+                        cfg.ProjectorBrightnessPercent = projectorBrightness;
+                        changed = true;
+                    }
                     if (string.IsNullOrEmpty(cfg.BrowserPath))
                     {
                         cfg.BrowserPath = DetectSupermium();
@@ -233,6 +249,8 @@ namespace ProjectorDash
                 ClampLocation();
                 ColorTheme = Ui.NormalizeTheme(ColorTheme);
                 AircraftRadiusKm = NormalizeAircraftRadius(AircraftRadiusKm);
+                ProjectorBrightnessPercent = NormalizePercent(
+                    ProjectorBrightnessPercent);
                 XmlSerializer ser = new XmlSerializer(typeof(AppConfig));
                 using (FileStream fs = File.Create(ConfigPath()))
                 {
@@ -284,6 +302,13 @@ namespace ProjectorDash
             if (value < 20) value = 20;
             if (value > 460) value = 460;
             return ((value + 10) / 20) * 20;
+        }
+
+        public static int NormalizePercent(int value)
+        {
+            if (value < 0) return 0;
+            if (value > 100) return 100;
+            return value;
         }
 
         private static List<ShortcutItem> DefaultShortcuts()
