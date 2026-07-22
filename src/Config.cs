@@ -78,6 +78,10 @@ namespace ProjectorDash
         // planet/star calculations remain available while this is disabled.
         public bool SkyNetworkEnabled = true;
 
+        // Offline horizon labels for the nearest IATA-coded airports. These
+        // use the bundled catalog and never make a network request.
+        public bool AirportMarkersEnabled = true;
+
         // Whole-app color palette and the saved radius used for free ADS-B
         // point queries. Radius changes are applied explicitly by the UI so
         // tapping +/- never burns requests while the user is deciding.

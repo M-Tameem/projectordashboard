@@ -48,6 +48,9 @@ namespace ProjectorDash
         public static Brush AircraftHistory { get; private set; }
         public static Brush AircraftOutline { get; private set; }
         public static Brush AircraftCourse { get; private set; }
+        public static Brush Airport { get; private set; }
+        public static Brush Reference { get; private set; }
+        public static Brush ReferenceDim { get; private set; }
         public static Brush LabelBg { get; private set; }
         public static Brush LabelLine { get; private set; }
         public static Brush DangerFill { get; private set; }
@@ -153,6 +156,11 @@ namespace ProjectorDash
             Planet = Hex("#A99BE8");
             Star = Hex("#61737D");
             IssLine = Hex("#806A3D");
+            Airport = MapZenith;
+            // Fixed neutral instrument colors keep permanent bearings, zenith,
+            // and rulers distinct from the user-selected live-traffic accent.
+            Reference = Hex("#A7BAC2");
+            ReferenceDim = Hex("#536870");
             DangerFill = Hex("#461721");
             DangerText = Hex("#FFF4F5");
             AlarmShade = Hex("#E60B0810");

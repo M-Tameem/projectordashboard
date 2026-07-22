@@ -102,6 +102,8 @@ namespace ProjectorDash
         private Button _ceilingMapBtn;
         private Button _skyNetworkBtn;
         private Button _ambientSkyNetworkBtn;
+        private Button _airportMarkersBtn;
+        private Button _ambientAirportMarkersBtn;
         private bool _projectorOverhead;
         private bool _overheadRestoresApp;
 
@@ -685,6 +687,11 @@ namespace ProjectorDash
             _overheadRangeBtn = SmallBtn("Range: " + _cfg.AircraftRadiusKm.ToString() + " km",
                 delegate { OpenAircraftRangePopup(_overheadRangeBtn); });
             actions.Children.Add(_overheadRangeBtn);
+            _airportMarkersBtn = SmallBtn("Airports: On",
+                delegate { ToggleAirportMarkers(); });
+            _airportMarkersBtn.ToolTip =
+                "Show or hide offline nearby-airport labels around the horizon.";
+            actions.Children.Add(_airportMarkersBtn);
             _ceilingMapBtn = SmallBtn("Show on projector", delegate { ToggleProjectorOverhead(); });
             _ceilingMapBtn.Background = Ui.AccentDim;
             _ceilingMapBtn.BorderBrush = Ui.Accent;
@@ -738,7 +745,7 @@ namespace ProjectorDash
             _overheadObjectsText.TextWrapping = TextWrapping.Wrap;
             infoStack.Children.Add(_overheadObjectsText);
             TextBlock key = Ui.Label(
-                "ACCENT  live aircraft + observed path\nAMBER  ISS + observed pass\nVIOLET  planets\nGREY  major stars\n\nAIRCRAFT  center is 0 km and the distance ruler ends at the selected search limit, so 60 km in a 120 km view appears halfway to that limit.\n\nSKY  center is zenith (90°); all edges are horizon (0°). EL 25° / 50° / 75° contours apply to the ISS, planets, and stars. Bearings wrap 360° around center. Dashed lines are reported aircraft courses; solid segments are observed movement.",
+                "ACCENT  live aircraft + accepted path\nAMBER  ISS + observed pass\nEDGE  nearby airports from the offline catalog\nVIOLET  planets + direction arrows\nGREY  major stars\nNEUTRAL  horizon, zenith + rulers\n\nAIRCRAFT  center is 0 km and the distance ruler ends at the selected search limit, so 60 km in a 120 km view appears halfway to that limit.\n\nSKY  center is zenith (90°); all edges are horizon (0°). EL 25° / 50° / 75° contours apply to the ISS, planets, and stars. Bearings wrap 360° around center. A dashed line extends only ahead along the accepted aircraft course; solid segments are accepted observed movement.",
                 12, Ui.TextDim);
             key.Margin = new Thickness(0, 18, 0, 0);
             key.TextWrapping = TextWrapping.Wrap;
@@ -1570,6 +1577,18 @@ namespace ProjectorDash
                         "° above horizon · " + AmbientService.Direction(_sky.Iss.BearingDegrees,
                         _cfg.FacingDegrees)
                     : "ISS · below horizon");
+            if (_sky.Iss.PassPredictionAvailable)
+                objects.Add(IssPassSummary(_sky.Iss, DateTime.UtcNow));
+            else if (externalFeedsEnabled && _sky.Iss.Available)
+                objects.Add("No ISS horizon pass found in the next 36 hours.");
+            if (_cfg.AirportMarkersEnabled)
+            {
+                foreach (AirportReading airport in _sky.Airports)
+                    objects.Add("AIRPORT " + airport.Code + " · " +
+                        Math.Round(airport.DistanceKm).ToString("0") + " km · " +
+                        AmbientService.Direction(airport.BearingDegrees,
+                            _cfg.FacingDegrees));
+            }
             foreach (PlanetReading planet in _sky.Planets)
                 objects.Add(planet.Name + " · " +
                     Math.Round(planet.AltitudeDegrees).ToString("0") + "° above horizon · " +
@@ -2476,11 +2495,16 @@ namespace ProjectorDash
             _ambientSkyNetworkBtn.ToolTip =
                 "Stops or resumes aircraft and ISS network requests. Local planet/star calculations remain on.";
             choices.Children.Add(_ambientSkyNetworkBtn);
+            _ambientAirportMarkersBtn = SmallBtn("Airports: On",
+                delegate { ToggleAirportMarkers(); });
+            _ambientAirportMarkersBtn.ToolTip =
+                "Uses the bundled airport catalog; no web request is made.";
+            choices.Children.Add(_ambientAirportMarkersBtn);
             Button refresh = SmallBtn("Refresh now", delegate { StartAmbientRefresh(true); });
             choices.Children.Add(refresh);
             right.Children.Add(choices);
             right.Children.Add(WrappedNote(
-                "Sky feeds controls only ADS-B aircraft and ISS requests. Weather remains on its normal 15-minute schedule; planet and star positions are calculated locally. Bearings are true-north compass directions; cloud and daylight can still hide an object."));
+                "Sky feeds controls only ADS-B aircraft and ISS requests. Weather remains on its normal 15-minute schedule; airports, planets, and stars are calculated from bundled/local data. ISS position and pass times use a Where the ISS at? TLE refreshed no more than once every six hours, then propagated locally; with feeds off, that estimate remains available for up to 24 hours. Bearings are true-north compass directions; cloud and daylight can still hide an object."));
             Grid.SetColumn(right, 2);
             page.Children.Add(right);
             return page;
@@ -2695,11 +2719,30 @@ namespace ProjectorDash
                 else
                 {
                     _sky = AmbientService.GetLocalSky(_cfg.Latitude, _cfg.Longitude,
-                        _cfg.AircraftRadiusKm);
+                        _cfg.AircraftRadiusKm, _cfg.AirportMarkersEnabled);
                     ApplyAmbientUi();
                 }
             }
             UpdateSkyNetworkButtons();
+        }
+
+        private void ToggleAirportMarkers()
+        {
+            _cfg.AirportMarkersEnabled = !_cfg.AirportMarkersEnabled;
+            _cfg.Save();
+            ApplyAirportMarkerPreference(_sky);
+            UpdateSkyNetworkButtons();
+            ApplyAmbientUi();
+        }
+
+        private void ApplyAirportMarkerPreference(SkyReading sky)
+        {
+            if (sky == null) return;
+            sky.AirportMarkersEnabled = _cfg.AirportMarkersEnabled;
+            sky.Airports.Clear();
+            if (_cfg.AirportMarkersEnabled && _cfg.LocationConfigured)
+                sky.Airports.AddRange(AirportCatalog.FindNearby(
+                    _cfg.Latitude, _cfg.Longitude));
         }
 
         private void UpdateSkyNetworkButtons()
@@ -2720,6 +2763,24 @@ namespace ProjectorDash
                     ? "Sky feeds: On" : "Sky feeds: Off";
                 _ambientSkyNetworkBtn.Background = enabled ? Ui.AccentDim : Ui.Panel;
                 _ambientSkyNetworkBtn.Foreground = enabled ? Ui.Accent : Ui.TextDim;
+            }
+            if (_airportMarkersBtn != null)
+            {
+                _airportMarkersBtn.Content = _cfg.AirportMarkersEnabled
+                    ? "Airports: On" : "Airports: Off";
+                _airportMarkersBtn.Background = _cfg.AirportMarkersEnabled
+                    ? Ui.AccentDim : Ui.Panel;
+                _airportMarkersBtn.Foreground = _cfg.AirportMarkersEnabled
+                    ? Ui.Accent : Ui.TextDim;
+            }
+            if (_ambientAirportMarkersBtn != null)
+            {
+                _ambientAirportMarkersBtn.Content = _cfg.AirportMarkersEnabled
+                    ? "Airports: On" : "Airports: Off";
+                _ambientAirportMarkersBtn.Background = _cfg.AirportMarkersEnabled
+                    ? Ui.AccentDim : Ui.Panel;
+                _ambientAirportMarkersBtn.Foreground = _cfg.AirportMarkersEnabled
+                    ? Ui.Accent : Ui.TextDim;
             }
             if (_aircraftRangeBtn != null)
             {
@@ -2802,7 +2863,7 @@ namespace ProjectorDash
             {
                 _nextSkyRefreshUtc = DateTime.MaxValue;
                 _sky = AmbientService.GetLocalSky(_cfg.Latitude, _cfg.Longitude,
-                    _cfg.AircraftRadiusKm);
+                    _cfg.AircraftRadiusKm, _cfg.AirportMarkersEnabled);
                 ApplyAmbientUi();
                 return;
             }
@@ -2813,7 +2874,8 @@ namespace ProjectorDash
             _skyRefreshCancellation = cancellation;
             int generation = ++_skyRefreshGeneration;
             AmbientService.GetSkyAsync(_cfg.Latitude, _cfg.Longitude,
-                requestedRadiusKm, cancellation.Token).ContinueWith(
+                requestedRadiusKm, _cfg.AirportMarkersEnabled,
+                cancellation.Token).ContinueWith(
                 delegate(Task<SkyReading> task)
                 {
                     if (generation != _skyRefreshGeneration) return;
@@ -2825,7 +2887,10 @@ namespace ProjectorDash
                     }
                     if (!task.IsCanceled && !task.IsFaulted &&
                         task.Result.AircraftRadiusKm == _cfg.AircraftRadiusKm)
+                    {
+                        ApplyAirportMarkerPreference(task.Result);
                         _sky = task.Result;
+                    }
                     else if (!task.IsCanceled && !task.IsFaulted)
                         _nextSkyRefreshUtc = DateTime.MinValue;
                     ApplyAmbientUi();
@@ -2898,7 +2963,7 @@ namespace ProjectorDash
                 if (_aircraftSourceText != null)
                     _aircraftSourceText.Text = "AIR TRAFFIC  /  REQUESTS DISABLED";
                 _aircraftText.Text =
-                    "No Sky Now network polling · use LIVE DATA OFF to resume";
+                    "No Sky Now network polling · tap LIVE DATA OFF to resume";
             }
             else if (!_sky.AircraftFeedAvailable)
             {
@@ -2945,6 +3010,18 @@ namespace ProjectorDash
                     : "ISS below horizon");
             }
             else orbit.Add("ISS feed offline");
+            if (_sky.Iss.PassPredictionAvailable)
+                orbit.Add(IssPassSummary(_sky.Iss, DateTime.UtcNow));
+            else if (_cfg.SkyNetworkEnabled && _sky.Iss.Available)
+                orbit.Add("No ISS pass in the next 36h");
+            if (_cfg.AirportMarkersEnabled && _sky.Airports.Count > 0)
+            {
+                AirportReading nearestAirport = _sky.Airports[0];
+                orbit.Add("Airport " + nearestAirport.Code + " " +
+                    Math.Round(nearestAirport.DistanceKm).ToString("0") + " km " +
+                    AmbientService.Direction(nearestAirport.BearingDegrees,
+                        _cfg.FacingDegrees));
+            }
             int planetLimit = Math.Min(3, _sky.Planets.Count);
             for (int i = 0; i < planetLimit; i++)
             {
@@ -2975,6 +3052,30 @@ namespace ProjectorDash
                 _projector.UpdateSky(planes + "  ·  " + string.Join("  ·  ", orbit.ToArray()));
             }
             UpdateOverheadUi();
+        }
+
+        private static string IssPassSummary(IssReading iss, DateTime nowUtc)
+        {
+            if (iss == null || !iss.PassPredictionAvailable) return "";
+            bool passActive = iss.NextSetUtc != DateTime.MinValue &&
+                nowUtc >= iss.NextRiseUtc && nowUtc < iss.NextSetUtc;
+            if (passActive)
+                return "ISS overhead (TLE) · sets in " + ShortDuration(iss.NextSetUtc - nowUtc) +
+                    " · peak " + Math.Round(iss.PassPeakElevationDegrees).ToString("0") + "° est.";
+            return "Next ISS pass (TLE) " + ShortDuration(iss.NextRiseUtc - nowUtc) +
+                " · " + iss.NextRiseUtc.ToLocalTime().ToString("h:mm tt") +
+                " · peak " + Math.Round(iss.PassPeakElevationDegrees).ToString("0") + "° est.";
+        }
+
+        private static string ShortDuration(TimeSpan remaining)
+        {
+            if (remaining.TotalSeconds < 0.0) remaining = TimeSpan.Zero;
+            if (remaining.TotalHours >= 1.0)
+                return ((int)remaining.TotalHours).ToString() + "h " +
+                    remaining.Minutes.ToString("00") + "m";
+            if (remaining.TotalMinutes >= 1.0)
+                return Math.Max(0, remaining.Minutes).ToString() + "m";
+            return Math.Max(0, remaining.Seconds).ToString() + "s";
         }
 
         private void RefreshAudioDeviceLists()
