@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Threading.Tasks;
 using System.Windows;
@@ -40,6 +41,12 @@ namespace ProjectorDash
         private bool _tabletAppMode;
         private bool _mirrorFullscreen;
         private List<IntPtr> _sleepingWindows = new List<IntPtr>();
+        private WeatherReading _weather;
+        private SkyReading _sky;
+        private DateTime _nextWeatherRefreshUtc = DateTime.MinValue;
+        private DateTime _nextSkyRefreshUtc = DateTime.MinValue;
+        private bool _weatherRefreshBusy;
+        private bool _skyRefreshBusy;
 
         // Layout pieces that depend on config / DPI
         private RowDefinition _bottomRow;
@@ -61,9 +68,16 @@ namespace ProjectorDash
         private Button _updateBtn;
         private Button _autoLockToggleBtn;
         private Popup _autoLockPopup;
+        private Popup _powerPopup;
         private TextBox _autoLockTime;
         private bool _suppressSliderEvents;
         private bool _updateBusy;
+        private TextBlock _weatherTempText;
+        private TextBlock _weatherConditionText;
+        private TextBlock _weatherMetaText;
+        private TextBlock _skyCountText;
+        private TextBlock _aircraftText;
+        private TextBlock _orbitText;
 
         // Live projector preview overlay
         private Grid _previewOverlay;
@@ -93,6 +107,13 @@ namespace ProjectorDash
         private ComboBox _alarmDeviceCombo;
         private TextBlock _audioDeviceStatus;
         private TextBlock _alarmDeviceStatus;
+        private TextBox _editLocationSearch;
+        private TextBox _editLatitude;
+        private TextBox _editLongitude;
+        private TextBox _editFacingDegrees;
+        private Button _facingBtn;
+        private Button _temperatureUnitBtn;
+        private TextBlock _locationStatus;
         private Grid[] _settingsPages;
         private Button[] _settingsTabButtons;
         private int _settingsPageIndex;
@@ -153,6 +174,8 @@ namespace ProjectorDash
             OpenProjectorWindow();
             UpdateAlarmUi();
             UpdateAutoLockUi();
+            ApplyAmbientUi();
+            StartAmbientRefresh(true);
 
             _clockTimer = new DispatcherTimer();
             _clockTimer.Interval = TimeSpan.FromSeconds(1);
@@ -203,6 +226,7 @@ namespace ProjectorDash
             if (proj == null) return;
             _projector = new ProjectorWindow(proj, _cfg.ProjectorMode);
             _projector.Show();
+            ApplyAmbientUi();
             Activate(); // keep touch focus on the controller
         }
 
@@ -212,6 +236,11 @@ namespace ProjectorDash
             _clockText.Text = now.ToString("h:mm");
             _dateText.Text = now.ToString("dddd, MMMM d");
             if (_projector != null) _projector.UpdateTime(now);
+            DateTime utc = DateTime.UtcNow;
+            if (_cfg.LocationConfigured && utc >= _nextSkyRefreshUtc)
+                RefreshSky();
+            if (_cfg.LocationConfigured && utc >= _nextWeatherRefreshUtc)
+                RefreshWeather();
             CheckAlarm(now);
             CheckAutoLock(now);
             _audioRefreshCounter++;
@@ -248,150 +277,126 @@ namespace ProjectorDash
             _reservedCol = new ColumnDefinition { Width = new GridLength(420) };
             root.ColumnDefinitions.Add(_reservedCol);
 
-            // --- Header: clock, date, system buttons -----------------------
+            // --- Compact instrument header --------------------------------
+            Border headerCard = new Border();
+            headerCard.Margin = new Thickness(22, 14, 22, 6);
+            headerCard.Padding = new Thickness(18, 10, 12, 10);
+            headerCard.Background = Ui.Panel;
+            headerCard.BorderBrush = Ui.Line;
+            headerCard.BorderThickness = new Thickness(1);
+            headerCard.CornerRadius = new CornerRadius(11);
             Grid header = new Grid();
-            header.Margin = new Thickness(28, 18, 28, 6);
+            header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(225) });
             header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
-            StackPanel clockStack = new StackPanel();
+            StackPanel clockStack = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
             _clockText = new TextBlock();
             _clockText.FontFamily = new FontFamily(Ui.FontLight);
-            _clockText.FontSize = 78;
+            _clockText.FontSize = 59;
             _clockText.Foreground = Ui.Text;
-            _clockText.Margin = new Thickness(0, -10, 0, 0);
+            _clockText.Margin = new Thickness(0, -8, 0, 0);
             clockStack.Children.Add(_clockText);
-            _dateText = Ui.Label("", 20, Ui.TextDim);
-            _dateText.Margin = new Thickness(4, -6, 0, 0);
+            _dateText = Ui.Label("", 15, Ui.TextDim);
+            _dateText.Margin = new Thickness(2, -5, 0, 0);
             clockStack.Children.Add(_dateText);
-            _alarmStatusText = Ui.Label("", 15, Ui.Accent);
-            _alarmStatusText.Margin = new Thickness(4, 4, 0, 0);
+            _alarmStatusText = Ui.Label("", 12, Ui.Accent);
+            _alarmStatusText.Margin = new Thickness(2, 3, 0, 0);
             clockStack.Children.Add(_alarmStatusText);
-            Grid.SetColumn(clockStack, 0);
             header.Children.Add(clockStack);
 
-            Grid sys = new Grid();
-            sys.VerticalAlignment = VerticalAlignment.Top;
-            sys.HorizontalAlignment = HorizontalAlignment.Right;
-            sys.Width = 870;
-            sys.ColumnDefinitions.Add(new ColumnDefinition
-                { Width = new GridLength(1, GridUnitType.Star) });
-            sys.ColumnDefinitions.Add(new ColumnDefinition
-                { Width = GridLength.Auto });
+            Grid weather = new Grid { Margin = new Thickness(4, 0, 18, 0) };
+            weather.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            weather.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            _weatherTempText = Ui.Label("--", 38, Ui.Text);
+            _weatherTempText.FontFamily = new FontFamily(Ui.FontLight);
+            _weatherTempText.Width = 105;
+            _weatherTempText.VerticalAlignment = VerticalAlignment.Center;
+            weather.Children.Add(_weatherTempText);
+            StackPanel weatherCopy = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+            _weatherConditionText = Ui.Label("SET LOCATION", 13, Ui.Accent);
+            _weatherConditionText.FontWeight = FontWeights.SemiBold;
+            weatherCopy.Children.Add(_weatherConditionText);
+            _weatherMetaText = Ui.Label("Settings › Ambient", 13, Ui.TextDim);
+            _weatherMetaText.TextTrimming = TextTrimming.CharacterEllipsis;
+            weatherCopy.Children.Add(_weatherMetaText);
+            TextBlock source = Ui.Label("OPEN-METEO", 10, Ui.Hex("#4D6971"));
+            source.Margin = new Thickness(0, 3, 0, 0);
+            weatherCopy.Children.Add(source);
+            Grid.SetColumn(weatherCopy, 1);
+            weather.Children.Add(weatherCopy);
+            Grid.SetColumn(weather, 1);
+            header.Children.Add(weather);
 
-            WrapPanel tools = new WrapPanel();
-            tools.Orientation = Orientation.Horizontal;
-            tools.VerticalAlignment = VerticalAlignment.Top;
-            tools.HorizontalAlignment = HorizontalAlignment.Right;
-            tools.Margin = new Thickness(0, 0, 10, 0);
-            sys.Children.Add(tools);
-
-            Button rb = Ui.Btn("Reset Supermium", 16, Ui.Panel, Ui.Text,
-                delegate { RestartBrowser(); });
-            rb.ToolTip = "Force-close Supermium and reopen it when the browser is stuck.";
-            rb.Margin = new Thickness(0, 0, 10, 10);
-            tools.Children.Add(rb);
-
-            Button kb = Ui.Btn("Keyboard", 17, Ui.Panel, Ui.Text, delegate { ShowTouchKeyboard(); });
-            kb.Margin = new Thickness(0, 0, 10, 10);
-            tools.Children.Add(kb);
-
-            _sleepBtn = Ui.Btn(_cfg.TabletOnlyMode ? "Sleep app" : "Sleep projector",
-                16, Ui.Panel, Ui.Text,
+            StackPanel actions = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            _sleepBtn = Ui.HeaderBtn(_cfg.TabletOnlyMode ? "Hide" : "Idle",
                 delegate { ToggleProjectorSleep(); });
             _sleepBtn.ToolTip = _cfg.TabletOnlyMode
                 ? "Hide the tablet app without closing its tabs; tap again to restore it."
                 : "Hide projector apps without closing their tabs; tap again to wake.";
-            _sleepBtn.Margin = new Thickness(0, 0, 10, 10);
-            tools.Children.Add(_sleepBtn);
+            actions.Children.Add(_sleepBtn);
 
-            _autoLockBtn = Ui.Btn("Auto-lock: Off", 16, Ui.Panel, Ui.Text,
-                delegate { OpenAutoLockPopup(); });
-            _autoLockBtn.Margin = new Thickness(0, 0, 10, 10);
-            _autoLockBtn.ToolTip = "Schedule a daily Windows lock (same as Win+L).";
-            tools.Children.Add(_autoLockBtn);
-            _autoLockPopup = BuildAutoLockPopup(_autoLockBtn);
-
-            _previewBtn = Ui.Btn("Preview", 17, Ui.Panel, Ui.Text,
+            _previewBtn = Ui.HeaderBtn("View",
                 delegate { OpenPreview(); });
-            _previewBtn.Margin = new Thickness(0, 0, 10, 10);
             _previewBtn.IsEnabled = !_cfg.TabletOnlyMode;
             _previewBtn.Opacity = _cfg.TabletOnlyMode ? 0.45 : 1.0;
             _previewBtn.ToolTip = _cfg.TabletOnlyMode
                 ? "Preview is available when the projector is the active target."
                 : "Show a live copy of the current projector window without opening another tab.";
-            tools.Children.Add(_previewBtn);
+            actions.Children.Add(_previewBtn);
 
-            Button desk = Ui.Btn("Desktop", 17, Ui.Panel, Ui.Text,
-                delegate
-                {
-                    if (_cfg.TabletOnlyMode) EnterTabletAppMode();
-                    else WindowState = WindowState.Minimized;
-                });
-            desk.Margin = new Thickness(0, 0, 10, 10);
-            tools.Children.Add(desk);
+            Button tools = Ui.HeaderBtn("Tools", delegate { OpenAutoLockPopup(); });
+            tools.ToolTip = "Keyboard, Windows desktop, and daily auto-lock.";
+            actions.Children.Add(tools);
+            _autoLockPopup = BuildAutoLockPopup(tools);
 
-            Button settings = Ui.Btn("Settings", 17, Ui.Panel, Ui.Text,
+            Button settings = Ui.HeaderBtn("Settings",
                 delegate { OpenSettings(); });
-            settings.Margin = new Thickness(0, 0, 10, 10);
-            tools.Children.Add(settings);
+            actions.Children.Add(settings);
 
-            _updateBtn = Ui.Btn("Update", 16, Ui.Panel, Ui.Text,
-                delegate { CheckForUpdates(); });
-            _updateBtn.Margin = new Thickness(0, 0, 10, 10);
-            _updateBtn.ToolTip = "One tap: install the latest stable GitHub release. Current version: " +
-                SelfUpdater.CurrentVersion;
-            tools.Children.Add(_updateBtn);
+            Button power = Ui.HeaderBtn("Power", delegate
+            {
+                if (_powerPopup != null) _powerPopup.IsOpen = true;
+            });
+            power.Foreground = Ui.Danger;
+            power.BorderBrush = Ui.Danger;
+            power.Margin = new Thickness(0);
+            power.ToolTip = "Projector, display, lock, and dashboard power actions.";
+            actions.Children.Add(power);
+            _powerPopup = BuildPowerPopup(power);
+            Grid.SetColumn(actions, 2);
+            header.Children.Add(actions);
 
-            Button emergency = Ui.Btn("Emergency off", 16,
-                Ui.Hex("#761527"), Ui.Hex("#FFF4F5"),
-                delegate { EmergencyOff(); });
-            emergency.BorderBrush = Ui.Danger;
-            emergency.Margin = new Thickness(0, 0, 10, 10);
-            emergency.ToolTip = "One tap: close all Supermium tabs, lock Windows, and turn off every display.";
-            tools.Children.Add(emergency);
+            headerCard.Child = header;
+            Grid.SetRow(headerCard, 0);
+            Grid.SetColumnSpan(headerCard, 2);
+            root.Children.Add(headerCard);
 
-            StackPanel closeTools = new StackPanel();
-            closeTools.VerticalAlignment = VerticalAlignment.Top;
-            closeTools.HorizontalAlignment = HorizontalAlignment.Right;
-
-            Button closeApp = Ui.Btn("Close app", 16, Ui.Panel, Ui.Danger,
-                delegate { CloseProjectedApp(); });
-            closeApp.BorderBrush = Ui.Danger;
-            closeApp.Margin = new Thickness(0, 0, 0, 10);
-            closeApp.MinWidth = 158;
-            closeTools.Children.Add(closeApp);
-
-            Button closeDashboard = Ui.Btn("Close dashboard", 16,
-                Ui.Hex("#6B1727"), Ui.Hex("#FFF4F5"), delegate { Close(); });
-            closeDashboard.BorderBrush = Ui.Hex("#E05269");
-            closeDashboard.Margin = new Thickness(0, 0, 0, 10);
-            closeDashboard.MinWidth = 158;
-            closeTools.Children.Add(closeDashboard);
-            Grid.SetColumn(closeTools, 1);
-            sys.Children.Add(closeTools);
-
-            Grid.SetColumn(sys, 1);
-            header.Children.Add(sys);
-
-            Grid.SetRow(header, 0);
-            Grid.SetColumnSpan(header, 2);
-            root.Children.Add(header);
-
-            // --- Launcher grid --------------------------------------------
+            // --- Reactive sky strip + launcher grid -----------------------
+            Grid launchArea = new Grid();
+            launchArea.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            launchArea.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+            launchArea.Children.Add(BuildSkyStrip());
             ScrollViewer scroller = new ScrollViewer();
             scroller.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
             scroller.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
             scroller.PanningMode = PanningMode.VerticalOnly;
-            scroller.Margin = new Thickness(21, 4, 21, 4);
+            scroller.Margin = new Thickness(21, 3, 21, 4);
 
             _tilePanel = new WrapPanel();
             _tilePanel.Orientation = Orientation.Horizontal;
             scroller.Content = _tilePanel;
 
             Grid.SetRow(scroller, 1);
-            Grid.SetColumnSpan(scroller, 2);
-            root.Children.Add(scroller);
+            launchArea.Children.Add(scroller);
+            Grid.SetRow(launchArea, 1);
+            Grid.SetColumnSpan(launchArea, 2);
+            root.Children.Add(launchArea);
 
             // Live one-source projector mirror. Like Settings, it leaves the
             // bottom audio/brightness and TouchMousePointer strip available.
@@ -431,7 +436,7 @@ namespace ProjectorDash
             outline.RadiusY = 14;
             reserved.Children.Add(outline);
 
-            TextBlock reservedLabel = Ui.Label("touch pad", 14, Ui.Hex("#4A443C"));
+            TextBlock reservedLabel = Ui.Label("touch pad", 14, Ui.Hex("#3E5961"));
             reservedLabel.HorizontalAlignment = HorizontalAlignment.Center;
             reservedLabel.VerticalAlignment = VerticalAlignment.Center;
             reserved.Children.Add(reservedLabel);
@@ -460,6 +465,115 @@ namespace ProjectorDash
             return root;
         }
 
+        private Border BuildSkyStrip()
+        {
+            Border card = new Border();
+            card.Margin = new Thickness(22, 2, 22, 4);
+            card.Padding = new Thickness(16, 9, 16, 9);
+            card.Background = Ui.Hex("#091218");
+            card.BorderBrush = Ui.Line;
+            card.BorderThickness = new Thickness(1);
+            card.CornerRadius = new CornerRadius(9);
+
+            Grid grid = new Grid();
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(150) });
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+            StackPanel status = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+            TextBlock mark = Ui.Label("SKY NOW", 11, Ui.Accent);
+            mark.FontWeight = FontWeights.SemiBold;
+            status.Children.Add(mark);
+            _skyCountText = Ui.Label("SET LOCATION", 15, Ui.Text);
+            _skyCountText.FontWeight = FontWeights.SemiBold;
+            status.Children.Add(_skyCountText);
+            grid.Children.Add(status);
+
+            StackPanel traffic = new StackPanel
+            {
+                Margin = new Thickness(14, 0, 16, 0),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            traffic.Children.Add(Ui.Label("AIR TRAFFIC  /  ADSB.LOL", 10, Ui.Hex("#4D6971")));
+            _aircraftText = Ui.Label("Location is not configured", 14, Ui.TextDim);
+            _aircraftText.TextTrimming = TextTrimming.CharacterEllipsis;
+            traffic.Children.Add(_aircraftText);
+            Grid.SetColumn(traffic, 1);
+            grid.Children.Add(traffic);
+
+            StackPanel orbit = new StackPanel
+            {
+                Margin = new Thickness(16, 0, 0, 0),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            orbit.Children.Add(Ui.Label("ORBIT + PLANETS  /  LOCAL CALC", 10, Ui.Hex("#4D6971")));
+            _orbitText = Ui.Label("ISS and planet bearings appear here", 14, Ui.TextDim);
+            _orbitText.TextTrimming = TextTrimming.CharacterEllipsis;
+            orbit.Children.Add(_orbitText);
+            Grid.SetColumn(orbit, 2);
+            grid.Children.Add(orbit);
+            card.Child = grid;
+            return card;
+        }
+
+        private Popup BuildPowerPopup(Button target)
+        {
+            Popup popup = new Popup();
+            popup.PlacementTarget = target;
+            popup.Placement = PlacementMode.Bottom;
+            popup.HorizontalOffset = -280;
+            popup.StaysOpen = false;
+            popup.AllowsTransparency = true;
+
+            Border card = new Border();
+            card.Width = 390;
+            card.Padding = new Thickness(18);
+            card.Background = Ui.PanelHi;
+            card.BorderBrush = Ui.Danger;
+            card.BorderThickness = new Thickness(1);
+            card.CornerRadius = new CornerRadius(10);
+            StackPanel panel = new StackPanel();
+            panel.Children.Add(SectionTitle("Power"));
+            panel.Children.Add(WrappedNote(
+                "Signal off blanks every display. HDMI-CEC standby physically powers down a compatible projector when a CEC adapter is present."));
+
+            Button closeApp = Ui.Btn("Close current projector app", 15, Ui.Panel, Ui.Text,
+                delegate { popup.IsOpen = false; CloseProjectedApp(); });
+            closeApp.Margin = new Thickness(0, 12, 0, 0);
+            panel.Children.Add(closeApp);
+            Button signal = Ui.Btn("Turn display signals off", 15, Ui.Panel, Ui.Text,
+                delegate { popup.IsOpen = false; ScreenUtil.TurnOffAllDisplays(); });
+            signal.Margin = new Thickness(0, 8, 0, 0);
+            panel.Children.Add(signal);
+            Button cec = Ui.Btn("Projector standby · HDMI-CEC", 15, Ui.AccentDim, Ui.Accent,
+                delegate
+                {
+                    popup.IsOpen = false;
+                    string message;
+                    bool ok = CecControl.SendProjectorStandby(out message);
+                    if (!ok) MessageBox.Show(this, message, "HDMI-CEC");
+                });
+            cec.Margin = new Thickness(0, 8, 0, 0);
+            cec.ToolTip = CecControl.FindClient().Length > 0
+                ? "Send physical standby through the detected free libCEC client."
+                : "Requires a CEC-capable HDMI output or USB-CEC adapter and free libCEC client.";
+            panel.Children.Add(cec);
+            Button secure = Ui.Btn("Lock tablet + emergency off", 15,
+                Ui.Hex("#461721"), Ui.Hex("#FFF4F5"),
+                delegate { popup.IsOpen = false; EmergencyOff(); });
+            secure.BorderBrush = Ui.Danger;
+            secure.Margin = new Thickness(0, 8, 0, 0);
+            panel.Children.Add(secure);
+            Button exit = Ui.Btn("Exit dashboard", 15, Ui.Panel, Ui.Danger,
+                delegate { popup.IsOpen = false; Close(); });
+            exit.BorderBrush = Ui.Danger;
+            exit.Margin = new Thickness(0, 8, 0, 0);
+            panel.Children.Add(exit);
+            card.Child = panel;
+            popup.Child = card;
+            return popup;
+        }
+
         private Popup BuildAutoLockPopup(Button target)
         {
             Popup popup = new Popup();
@@ -478,8 +592,26 @@ namespace ProjectorDash
             card.CornerRadius = new CornerRadius(12);
 
             StackPanel panel = new StackPanel();
-            TextBlock title = SectionTitle("Daily tablet auto-lock");
+            TextBlock title = SectionTitle("Tools");
             panel.Children.Add(title);
+            StackPanel quick = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Margin = new Thickness(0, 10, 0, 12)
+            };
+            quick.Children.Add(SmallBtn("Keyboard", delegate
+            {
+                popup.IsOpen = false;
+                ShowTouchKeyboard();
+            }));
+            quick.Children.Add(SmallBtn("Windows desktop", delegate
+            {
+                popup.IsOpen = false;
+                if (_cfg.TabletOnlyMode) EnterTabletAppMode();
+                else WindowState = WindowState.Minimized;
+            }));
+            panel.Children.Add(quick);
+            panel.Children.Add(SectionTitle("Daily tablet auto-lock"));
             panel.Children.Add(WrappedNote(
                 "Locks Windows at this time every day—the same as pressing Win+L."));
 
@@ -489,7 +621,7 @@ namespace ProjectorDash
             _autoLockTime = Ui.Input("1:00 AM", 17);
             _autoLockTime.Width = 130;
             row.Children.Add(_autoLockTime);
-            Button save = Ui.Btn("Save", 16, Ui.Accent, Ui.Hex("#141210"),
+            Button save = Ui.Btn("Save", 16, Ui.Accent, Ui.Hex("#041014"),
                 delegate { SaveAutoLockTime(); });
             save.Margin = new Thickness(10, 0, 0, 0);
             row.Children.Add(save);
@@ -506,7 +638,7 @@ namespace ProjectorDash
 
         private Grid BuildPreviewOverlay()
         {
-            Grid overlay = new Grid { Background = Ui.Hex("#0C0A14") };
+            Grid overlay = new Grid { Background = Ui.Hex("#071015") };
             Grid inner = new Grid { Margin = new Thickness(24, 12, 24, 10) };
             inner.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             inner.RowDefinitions.Add(new RowDefinition
@@ -533,7 +665,7 @@ namespace ProjectorDash
             fullscreen.Background = Ui.AccentDim;
             fullscreen.BorderBrush = Ui.Accent;
             actions.Children.Add(fullscreen);
-            Button back = Ui.Btn("Back", 17, Ui.Accent, Ui.Hex("#141210"),
+            Button back = Ui.Btn("Back", 17, Ui.Accent, Ui.Hex("#041014"),
                 delegate { ClosePreview(); });
             actions.Children.Add(back);
             Grid.SetColumn(actions, 1);
@@ -709,7 +841,7 @@ namespace ProjectorDash
             }
 
             Button add = Ui.Tile("+", "add shortcut", delegate { OpenSettings(); });
-            add.Background = Ui.Hex("#150F24");
+            add.Background = Ui.Hex("#08171D");
             add.BorderBrush = Ui.Line;
             _tilePanel.Children.Add(add);
         }
@@ -1243,9 +1375,9 @@ namespace ProjectorDash
         {
             if (_sleepBtn == null) return;
             if (_cfg.TabletOnlyMode)
-                _sleepBtn.Content = _projectorSleeping ? "Wake app" : "Sleep app";
+                _sleepBtn.Content = _projectorSleeping ? "WAKE" : "HIDE";
             else
-                _sleepBtn.Content = _projectorSleeping ? "Wake projector" : "Sleep projector";
+                _sleepBtn.Content = _projectorSleeping ? "WAKE" : "IDLE";
             _sleepBtn.Background = _projectorSleeping ? Ui.AccentDim : Ui.Panel;
             _sleepBtn.BorderBrush = _projectorSleeping ? Ui.Accent : Ui.Line;
         }
@@ -1335,7 +1467,7 @@ namespace ProjectorDash
 
                 _updateBusy = false;
                 _updateBtn.IsEnabled = true;
-                _updateBtn.Content = "Update";
+                _updateBtn.Content = "Check for update";
                 MessageBox.Show(this, result.Message, "Projector Dashboard Update");
             }, TaskScheduler.FromCurrentSynchronizationContext());
         }
@@ -1360,6 +1492,7 @@ namespace ProjectorDash
             UpdateTabletModeButton();
             UpdateAlarmUi();
             _editBrowser.Text = _cfg.BrowserPath ?? "";
+            PopulateAmbientEditor();
             RefreshAudioDeviceLists();
             SelectSettingsPage(pageIndex);
             _settingsOverlay.Visibility = Visibility.Visible;
@@ -1374,7 +1507,7 @@ namespace ProjectorDash
         private Grid BuildSettingsOverlay()
         {
             Grid overlay = new Grid();
-            overlay.Background = Ui.Hex("#0C0A14");
+            overlay.Background = Ui.Hex("#071015");
 
             Grid inner = new Grid();
             inner.Margin = new Thickness(24, 12, 24, 8);
@@ -1388,7 +1521,7 @@ namespace ProjectorDash
             TextBlock title = Ui.Label("Settings", 29, Ui.Text);
             title.FontWeight = FontWeights.SemiBold;
             titleRow.Children.Add(title);
-            Button done = Ui.Btn("Done", 17, Ui.Accent, Ui.Hex("#141210"),
+            Button done = Ui.Btn("Done", 17, Ui.Accent, Ui.Hex("#041014"),
                 delegate { CloseSettings(); });
             Grid.SetColumn(done, 1);
             titleRow.Children.Add(done);
@@ -1397,7 +1530,7 @@ namespace ProjectorDash
             WrapPanel tabs = new WrapPanel();
             tabs.Orientation = Orientation.Horizontal;
             tabs.Margin = new Thickness(0, 6, 0, 4);
-            string[] names = new string[] { "Shortcuts", "Projector", "Audio + browser", "Alarm" };
+            string[] names = new string[] { "Shortcuts", "Projector", "Audio + browser", "Alarm", "Ambient" };
             _settingsTabButtons = new Button[names.Length];
             for (int i = 0; i < names.Length; i++)
             {
@@ -1418,7 +1551,8 @@ namespace ProjectorDash
                 BuildShortcutSettingsPage(),
                 BuildProjectorSettingsPage(),
                 BuildAudioSettingsPage(),
-                BuildAlarmSettingsPage()
+                BuildAlarmSettingsPage(),
+                BuildAmbientSettingsPage()
             };
             foreach (Grid page in _settingsPages) pageHost.Children.Add(page);
             Grid.SetRow(pageHost, 2);
@@ -1496,7 +1630,7 @@ namespace ProjectorDash
             editButtons.Children.Add(SmallBtn("Browse app", delegate { BrowseForProgram(); }));
             Button save = SmallBtn("Save shortcut", delegate { SaveEditedShortcut(); });
             save.Background = Ui.Accent;
-            save.Foreground = Ui.Hex("#141210");
+            save.Foreground = Ui.Hex("#041014");
             editButtons.Children.Add(save);
             editor.Children.Add(editButtons);
             Grid.SetColumn(editor, 2);
@@ -1522,8 +1656,8 @@ namespace ProjectorDash
             left.Children.Add(WrappedNote(
                 _cfg.TabletOnlyMode
                 ? "Tablet-only launches fullscreen here and keeps a small Dashboard / emergency-off control above the app. Sleep hides the app without closing its tabs."
-                : "Sleep projector hides open apps and tabs without closing them, then shows the idle clock until you wake it."));
-            Button sleep = SmallBtn("Sleep / wake now", delegate { ToggleProjectorSleep(); });
+                : "Idle hides open apps and tabs without closing them, then shows the ambient screen until you wake it."));
+            Button sleep = SmallBtn("Idle / wake now", delegate { ToggleProjectorSleep(); });
             sleep.Margin = new Thickness(0, 10, 0, 0);
             left.Children.Add(sleep);
             page.Children.Add(left);
@@ -1552,6 +1686,9 @@ namespace ProjectorDash
             Button displays = SmallBtn("Reassign displays", delegate { ReassignDisplays(); });
             displays.Margin = new Thickness(0, 10, 0, 0);
             right.Children.Add(displays);
+            right.Children.Add(WrappedNote(CecControl.FindClient().Length > 0
+                ? "HDMI-CEC: free libCEC client detected. The Power menu can send physical projector standby."
+                : "HDMI-CEC: this PC can blank its video signal. Physical projector standby additionally needs CEC-capable HDMI hardware (commonly a USB-CEC adapter) and the free libCEC client."));
             Grid.SetColumn(right, 2);
             page.Children.Add(right);
             return page;
@@ -1583,6 +1720,10 @@ namespace ProjectorDash
             buttons.Children.Add(SmallBtn("Browse", delegate { BrowseBrowser(); }));
             buttons.Children.Add(SmallBtn("Save path", delegate { SaveBrowserPath(); }));
             buttons.Children.Add(SmallBtn("Reset now", delegate { RestartBrowser(); }));
+            _updateBtn = SmallBtn("Check for update", delegate { CheckForUpdates(); });
+            _updateBtn.ToolTip = "Install the latest stable dashboard release. Current: " +
+                SelfUpdater.CurrentVersion;
+            buttons.Children.Add(_updateBtn);
             right.Children.Add(buttons);
             right.Children.Add(WrappedNote(
                 "Reset now force-closes and reopens Supermium. Use it only when the browser or video playback is stuck."));
@@ -1623,6 +1764,81 @@ namespace ProjectorDash
             right.Children.Add(_alarmDeviceStatus);
             right.Children.Add(WrappedNote(
                 "When ringing, this endpoint is forced to 100% and unmuted. Other app/browser audio sessions are muted, then every previous output, volume, and mute state is restored."));
+            Grid.SetColumn(right, 2);
+            page.Children.Add(right);
+            return page;
+        }
+
+        private Grid BuildAmbientSettingsPage()
+        {
+            Grid page = TwoColumnSettingsPage();
+            StackPanel left = new StackPanel();
+            left.Children.Add(SectionTitle("One-time location"));
+            left.Children.Add(WrappedNote(
+                "Enter a city, town, or postal code. Windows Location Services are never used."));
+            _editLocationSearch = Ui.Input("", 17);
+            _editLocationSearch.Margin = new Thickness(0, 8, 0, 0);
+            left.Children.Add(_editLocationSearch);
+            Button find = SmallBtn("Find and save", delegate { FindAmbientLocation(); });
+            find.Margin = new Thickness(0, 8, 0, 0);
+            left.Children.Add(find);
+            _locationStatus = WrappedNote("No location saved.");
+            _locationStatus.Foreground = Ui.Accent;
+            left.Children.Add(_locationStatus);
+            left.Children.Add(WrappedNote(
+                "Weather: Open-Meteo. Aircraft: adsb.lol. ISS: Where the ISS at? No API keys, accounts, subscriptions, or paid services."));
+            page.Children.Add(left);
+
+            StackPanel right = new StackPanel();
+            right.Children.Add(SectionTitle("Accuracy + orientation"));
+            right.Children.Add(WrappedNote(
+                "You can refine the saved coordinates. Set the true compass direction faced by the top of this display for room-relative left/right cues."));
+            StackPanel coordinates = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Margin = new Thickness(0, 8, 0, 0)
+            };
+            _editLatitude = Ui.Input("", 16);
+            _editLatitude.Width = 132;
+            _editLatitude.ToolTip = "Latitude (-90 to 90)";
+            coordinates.Children.Add(_editLatitude);
+            _editLongitude = Ui.Input("", 16);
+            _editLongitude.Width = 132;
+            _editLongitude.Margin = new Thickness(8, 0, 0, 0);
+            _editLongitude.ToolTip = "Longitude (-180 to 180)";
+            coordinates.Children.Add(_editLongitude);
+            Button save = SmallBtn("Save exact", delegate { SaveExactLocation(); });
+            save.Margin = new Thickness(8, 0, 0, 0);
+            coordinates.Children.Add(save);
+            right.Children.Add(coordinates);
+
+            StackPanel orientation = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Margin = new Thickness(0, 10, 0, 0)
+            };
+            _facingBtn = SmallBtn("View faces: N", delegate { CycleFacingDirection(); });
+            orientation.Children.Add(_facingBtn);
+            _editFacingDegrees = Ui.Input("0", 16);
+            _editFacingDegrees.Width = 70;
+            _editFacingDegrees.ToolTip = "Exact true heading in degrees (0 north, 90 east).";
+            orientation.Children.Add(_editFacingDegrees);
+            Button saveFacing = SmallBtn("Save heading °", delegate { SaveFacingDirection(); });
+            saveFacing.Margin = new Thickness(8, 0, 0, 0);
+            orientation.Children.Add(saveFacing);
+            right.Children.Add(orientation);
+            StackPanel choices = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Margin = new Thickness(0, 8, 0, 0)
+            };
+            _temperatureUnitBtn = SmallBtn("Units: °C", delegate { ToggleTemperatureUnit(); });
+            choices.Children.Add(_temperatureUnitBtn);
+            Button refresh = SmallBtn("Refresh now", delegate { StartAmbientRefresh(true); });
+            choices.Children.Add(refresh);
+            right.Children.Add(choices);
+            right.Children.Add(WrappedNote(
+                "Planet positions are calculated locally from JPL orbital elements. Bearings are true-north compass directions; cloud and daylight can still hide an object."));
             Grid.SetColumn(right, 2);
             page.Children.Add(right);
             return page;
@@ -1696,6 +1912,269 @@ namespace ProjectorDash
                 _settingsPages[i].Visibility = selected ? Visibility.Visible : Visibility.Collapsed;
                 _settingsTabButtons[i].Background = selected ? Ui.AccentDim : Ui.Panel;
                 _settingsTabButtons[i].BorderBrush = selected ? Ui.Accent : Ui.Line;
+            }
+        }
+
+        private void PopulateAmbientEditor()
+        {
+            if (_editLocationSearch != null)
+                _editLocationSearch.Text = _cfg.LocationName ?? "";
+            if (_editLatitude != null)
+                _editLatitude.Text = _cfg.LocationConfigured
+                    ? _cfg.Latitude.ToString("0.######", CultureInfo.InvariantCulture) : "";
+            if (_editLongitude != null)
+                _editLongitude.Text = _cfg.LocationConfigured
+                    ? _cfg.Longitude.ToString("0.######", CultureInfo.InvariantCulture) : "";
+            if (_facingBtn != null)
+                _facingBtn.Content = "View faces: " + AmbientService.Cardinal(_cfg.FacingDegrees);
+            if (_editFacingDegrees != null)
+                _editFacingDegrees.Text = _cfg.FacingDegrees.ToString(CultureInfo.InvariantCulture);
+            if (_temperatureUnitBtn != null)
+                _temperatureUnitBtn.Content = _cfg.UseFahrenheit ? "Units: °F" : "Units: °C";
+            if (_locationStatus != null)
+            {
+                _locationStatus.Text = _cfg.LocationConfigured
+                    ? (_cfg.LocationName + " · " +
+                        _cfg.Latitude.ToString("0.####", CultureInfo.InvariantCulture) + ", " +
+                        _cfg.Longitude.ToString("0.####", CultureInfo.InvariantCulture))
+                    : "No location saved.";
+            }
+        }
+
+        private void FindAmbientLocation()
+        {
+            if (_editLocationSearch == null) return;
+            string search = _editLocationSearch.Text.Trim();
+            if (search.Length == 0)
+            {
+                _locationStatus.Text = "Enter a city, town, or postal code.";
+                return;
+            }
+            _locationStatus.Text = "Finding location…";
+            AmbientService.FindLocationAsync(search).ContinueWith(delegate(Task<AmbientLocation> task)
+            {
+                if (task.IsFaulted || task.IsCanceled)
+                {
+                    Exception error = task.Exception == null ? null : task.Exception.GetBaseException();
+                    _locationStatus.Text = error == null ? "Location lookup failed."
+                        : "Location lookup failed: " + error.Message;
+                    return;
+                }
+                AmbientLocation location = task.Result;
+                _cfg.LocationConfigured = true;
+                _cfg.LocationName = location.DisplayName;
+                _cfg.Latitude = location.Latitude;
+                _cfg.Longitude = location.Longitude;
+                _cfg.Save();
+                PopulateAmbientEditor();
+                StartAmbientRefresh(true);
+            }, TaskScheduler.FromCurrentSynchronizationContext());
+        }
+
+        private void SaveExactLocation()
+        {
+            double latitude, longitude;
+            if (_editLatitude == null || _editLongitude == null ||
+                !TryCoordinate(_editLatitude.Text, out latitude) ||
+                !TryCoordinate(_editLongitude.Text, out longitude) ||
+                latitude < -90.0 || latitude > 90.0 ||
+                longitude < -180.0 || longitude > 180.0)
+            {
+                _locationStatus.Text = "Enter latitude -90…90 and longitude -180…180.";
+                return;
+            }
+            _cfg.Latitude = latitude;
+            _cfg.Longitude = longitude;
+            _cfg.LocationConfigured = true;
+            if (string.IsNullOrWhiteSpace(_cfg.LocationName))
+                _cfg.LocationName = "Custom location";
+            _cfg.Save();
+            PopulateAmbientEditor();
+            StartAmbientRefresh(true);
+        }
+
+        private static bool TryCoordinate(string text, out double value)
+        {
+            return double.TryParse((text ?? "").Trim(), NumberStyles.Float,
+                CultureInfo.InvariantCulture, out value) ||
+                double.TryParse((text ?? "").Trim(), NumberStyles.Float,
+                CultureInfo.CurrentCulture, out value);
+        }
+
+        private void CycleFacingDirection()
+        {
+            _cfg.FacingDegrees = (_cfg.FacingDegrees + 45) % 360;
+            _cfg.Save();
+            PopulateAmbientEditor();
+            ApplyAmbientUi();
+        }
+
+        private void SaveFacingDirection()
+        {
+            double heading;
+            if (_editFacingDegrees == null ||
+                !TryCoordinate(_editFacingDegrees.Text, out heading) ||
+                heading < 0.0 || heading >= 360.0)
+            {
+                _locationStatus.Text = "Heading must be 0…359° clockwise from true north.";
+                return;
+            }
+            _cfg.FacingDegrees = (int)Math.Round(heading) % 360;
+            _cfg.Save();
+            PopulateAmbientEditor();
+            ApplyAmbientUi();
+        }
+
+        private void ToggleTemperatureUnit()
+        {
+            _cfg.UseFahrenheit = !_cfg.UseFahrenheit;
+            _cfg.Save();
+            _weather = null;
+            PopulateAmbientEditor();
+            StartAmbientRefresh(true);
+        }
+
+        private void StartAmbientRefresh(bool immediate)
+        {
+            if (!_cfg.LocationConfigured)
+            {
+                ApplyAmbientUi();
+                return;
+            }
+            if (immediate)
+            {
+                _nextWeatherRefreshUtc = DateTime.MinValue;
+                _nextSkyRefreshUtc = DateTime.MinValue;
+            }
+            RefreshWeather();
+            RefreshSky();
+        }
+
+        private void RefreshWeather()
+        {
+            if (!_cfg.LocationConfigured || _weatherRefreshBusy) return;
+            _weatherRefreshBusy = true;
+            _nextWeatherRefreshUtc = DateTime.UtcNow.AddMinutes(15);
+            AmbientService.GetWeatherAsync(_cfg.Latitude, _cfg.Longitude,
+                _cfg.UseFahrenheit).ContinueWith(delegate(Task<WeatherReading> task)
+            {
+                _weatherRefreshBusy = false;
+                if (!task.IsCanceled && !task.IsFaulted) _weather = task.Result;
+                else if (_weather == null && _weatherMetaText != null)
+                    _weatherMetaText.Text = "Weather offline · retrying";
+                ApplyAmbientUi();
+            }, TaskScheduler.FromCurrentSynchronizationContext());
+        }
+
+        private void RefreshSky()
+        {
+            if (!_cfg.LocationConfigured || _skyRefreshBusy) return;
+            _skyRefreshBusy = true;
+            _nextSkyRefreshUtc = DateTime.UtcNow.AddSeconds(45);
+            AmbientService.GetSkyAsync(_cfg.Latitude, _cfg.Longitude).ContinueWith(
+                delegate(Task<SkyReading> task)
+                {
+                    _skyRefreshBusy = false;
+                    if (!task.IsCanceled && !task.IsFaulted) _sky = task.Result;
+                    ApplyAmbientUi();
+                }, TaskScheduler.FromCurrentSynchronizationContext());
+        }
+
+        private void ApplyAmbientUi()
+        {
+            if (_weatherTempText == null || _skyCountText == null) return;
+            if (!_cfg.LocationConfigured)
+            {
+                _weatherTempText.Text = "--";
+                _weatherConditionText.Text = "SET LOCATION";
+                _weatherMetaText.Text = "Settings › Ambient";
+                _skyCountText.Text = "SET LOCATION";
+                _aircraftText.Text = "Location is not configured";
+                _orbitText.Text = "ISS and planet bearings appear here";
+                if (_projector != null)
+                {
+                    _projector.UpdateWeather("--", "Set location on the tablet", "Settings › Ambient");
+                    _projector.UpdateSky("Set a location to show aircraft, ISS, and planets");
+                }
+                return;
+            }
+
+            if (_weather != null)
+            {
+                string degree = Math.Round(_weather.Temperature).ToString("0") + "°";
+                _weatherTempText.Text = degree;
+                _weatherConditionText.Text = _weather.Condition.ToUpperInvariant();
+                _weatherMetaText.Text = "Feels " + Math.Round(_weather.FeelsLike).ToString("0") + "°  ·  H " +
+                    Math.Round(_weather.High).ToString("0") + "° / L " +
+                    Math.Round(_weather.Low).ToString("0") + "°  ·  Wind " +
+                    Math.Round(_weather.WindSpeed).ToString("0") + " " + _weather.WindUnit;
+                if (_projector != null)
+                {
+                    _projector.UpdateWeather(degree + (_weather.Fahrenheit ? "F" : "C"),
+                        _weather.Condition, _cfg.LocationName + "  ·  " + _weatherMetaText.Text);
+                }
+            }
+            else
+            {
+                _weatherTempText.Text = "--";
+                _weatherConditionText.Text = "LOADING WEATHER";
+                _weatherMetaText.Text = _cfg.LocationName;
+            }
+
+            if (_sky == null)
+            {
+                _skyCountText.Text = "SCANNING";
+                _aircraftText.Text = "Checking nearby airspace…";
+                _orbitText.Text = "Calculating ISS and planets…";
+                return;
+            }
+
+            if (!_sky.AircraftFeedAvailable)
+            {
+                _skyCountText.Text = "FEED OFFLINE";
+                _aircraftText.Text = "Aircraft feed unavailable · retrying automatically";
+            }
+            else
+            {
+                _skyCountText.Text = _sky.Planes.Count == 0 ? "CLEAR AIRSPACE" :
+                    _sky.Planes.Count.ToString() + (_sky.Planes.Count == 1 ? " AIRCRAFT" : " AIRCRAFT");
+                List<string> traffic = new List<string>();
+                foreach (PlaneReading plane in _sky.Planes)
+                {
+                    traffic.Add(plane.Label + " · " + Math.Round(plane.DistanceKm).ToString("0") +
+                        " km " + AmbientService.Direction(plane.BearingDegrees, _cfg.FacingDegrees) +
+                        " · " + plane.AltitudeFeet.ToString("N0") + " ft");
+                }
+                _aircraftText.Text = traffic.Count == 0 ? "No aircraft within 40 km" :
+                    string.Join("   |   ", traffic.ToArray());
+            }
+
+            List<string> orbit = new List<string>();
+            if (_sky.Iss.Available)
+            {
+                orbit.Add(_sky.Iss.AboveHorizon
+                    ? "ISS " + Math.Round(_sky.Iss.ElevationDegrees).ToString("0") + "° " +
+                        AmbientService.Direction(_sky.Iss.BearingDegrees, _cfg.FacingDegrees)
+                    : "ISS below horizon");
+            }
+            else orbit.Add("ISS feed offline");
+            int planetLimit = Math.Min(3, _sky.Planets.Count);
+            for (int i = 0; i < planetLimit; i++)
+            {
+                PlanetReading planet = _sky.Planets[i];
+                orbit.Add(planet.Name + " " + Math.Round(planet.AltitudeDegrees).ToString("0") + "° " +
+                    AmbientService.Direction(planet.BearingDegrees, _cfg.FacingDegrees));
+            }
+            if (_sky.Planets.Count == 0) orbit.Add("No planets above horizon");
+            _orbitText.Text = string.Join("   |   ", orbit.ToArray());
+
+            if (_projector != null)
+            {
+                string planes = _sky.AircraftFeedAvailable
+                    ? (_sky.Planes.Count == 0 ? "No nearby aircraft" :
+                        _sky.Planes.Count.ToString() + " aircraft nearby")
+                    : "Aircraft feed offline";
+                _projector.UpdateSky(planes + "  ·  " + string.Join("  ·  ", orbit.ToArray()));
             }
         }
 

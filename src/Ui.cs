@@ -9,34 +9,34 @@ namespace ProjectorDash
 {
     /// <summary>
     /// Theme + small factory helpers so every control on the dashboard is
-    /// built from the same handful of colors and sizes. Warm, dim palette:
-    /// this thing lives next to a bed, so amber accents over cool blue.
+    /// built from the same handful of colors and sizes. The palette stays
+    /// nearly black at night, with a restrained cyan instrument-panel accent.
     /// </summary>
     public static class Ui
     {
         // Palette
-        public static readonly Brush Bg        = Hex("#0B0A12"); // near-black, violet tint
-        public static readonly Brush Panel     = Hex("#161320"); // card surface
-        public static readonly Brush PanelHi   = Hex("#201B30"); // raised surface
-        public static readonly Brush Line      = Hex("#2E2744"); // hairline borders
-        public static readonly Brush Text      = Hex("#F2F0F7"); // white
-        public static readonly Brush TextDim   = Hex("#8E86A6"); // secondary
-        public static readonly Brush Accent    = Hex("#A78BFA"); // soft violet
-        public static readonly Brush AccentDim = Hex("#3A2D62"); // deep violet fill
-        public static readonly Brush Danger    = Hex("#C96A7A");
+        public static readonly Brush Bg        = Hex("#060A0E"); // near-black, cool tint
+        public static readonly Brush Panel     = Hex("#0D151C"); // card surface
+        public static readonly Brush PanelHi   = Hex("#121F28"); // raised surface
+        public static readonly Brush Line      = Hex("#1C3540"); // hairline borders
+        public static readonly Brush Text      = Hex("#EDF7F8"); // cool white
+        public static readonly Brush TextDim   = Hex("#79909A"); // secondary
+        public static readonly Brush Accent    = Hex("#59DCE2"); // quiet cyan
+        public static readonly Brush AccentDim = Hex("#10363C"); // deep cyan fill
+        public static readonly Brush Danger    = Hex("#EE7180");
 
-        // Shared black -> deep-purple wash used as the controller backdrop.
+        // Shared black -> deep-blue wash used as the controller backdrop.
         public static Brush BgGradient()
         {
             LinearGradientBrush g = new LinearGradientBrush();
             g.StartPoint = new Point(0.1, 0.0);
             g.EndPoint   = new Point(0.9, 1.0);
             g.GradientStops.Add(new GradientStop(
-                (Color)ColorConverter.ConvertFromString("#0A0910"), 0.0));
+                    (Color)ColorConverter.ConvertFromString("#05090C"), 0.0));
             g.GradientStops.Add(new GradientStop(
-                (Color)ColorConverter.ConvertFromString("#120E20"), 0.55));
+                    (Color)ColorConverter.ConvertFromString("#071218"), 0.58));
             g.GradientStops.Add(new GradientStop(
-                (Color)ColorConverter.ConvertFromString("#1B1233"), 1.0));
+                    (Color)ColorConverter.ConvertFromString("#0A2027"), 1.0));
             g.Freeze();
             return g;
         }
@@ -69,7 +69,7 @@ namespace ProjectorDash
                     "<Border x:Name=\"bd\" Background=\"{TemplateBinding Background}\"" +
                     " BorderBrush=\"{TemplateBinding BorderBrush}\"" +
                     " BorderThickness=\"{TemplateBinding BorderThickness}\"" +
-                    " CornerRadius=\"12\">" +
+                    " CornerRadius=\"9\">" +
                     "<ContentPresenter HorizontalAlignment=\"Center\" VerticalAlignment=\"Center\"" +
                     " Margin=\"{TemplateBinding Padding}\"/>" +
                     "</Border>" +
@@ -104,6 +104,19 @@ namespace ProjectorDash
             b.Template = FlatButtonTemplate();
             b.Focusable = false;
             if (click != null) b.Click += click;
+            return b;
+        }
+
+        /// <summary>Compact, uppercase action used by the controller toolbar.</summary>
+        public static Button HeaderBtn(string text, RoutedEventHandler click)
+        {
+            Button b = Btn(text.ToUpperInvariant(), 13, Panel, Text, click);
+            b.FontWeight = FontWeights.SemiBold;
+            b.MinWidth = 84;
+            b.Height = 48;
+            b.MinHeight = 48;
+            b.Padding = new Thickness(13, 7, 13, 7);
+            b.Margin = new Thickness(0, 0, 8, 0);
             return b;
         }
 
