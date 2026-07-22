@@ -51,6 +51,32 @@ namespace ProjectorDash
         private static extern bool PostMessage(IntPtr hWnd, uint message,
             IntPtr wParam, IntPtr lParam);
 
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetForegroundWindow();
+
+        [DllImport("user32.dll")]
+        private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern bool BringWindowToTop(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern bool GetGUIThreadInfo(uint threadId,
+            ref GuiThreadInfo info);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern uint SendInput(uint inputCount,
+            NativeInput[] inputs, int inputSize);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern bool SetProp(IntPtr hWnd, string name, IntPtr data);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern IntPtr GetProp(IntPtr hWnd, string name);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern IntPtr RemoveProp(IntPtr hWnd, string name);
+
         [DllImport("user32.dll", EntryPoint = "LockWorkStation")]
         private static extern bool LockWorkStationNative();
 
@@ -61,6 +87,64 @@ namespace ProjectorDash
             public int Top;
             public int Right;
             public int Bottom;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct GuiThreadInfo
+        {
+            public int cbSize;
+            public uint flags;
+            public IntPtr hwndActive;
+            public IntPtr hwndFocus;
+            public IntPtr hwndCapture;
+            public IntPtr hwndMenuOwner;
+            public IntPtr hwndMoveSize;
+            public IntPtr hwndCaret;
+            public NativeRect rcCaret;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NativeInput
+        {
+            public uint type;
+            public InputUnion data;
+        }
+
+        [StructLayout(LayoutKind.Explicit)]
+        private struct InputUnion
+        {
+            [FieldOffset(0)] public MouseInput mouse;
+            [FieldOffset(0)] public KeyboardInput keyboard;
+            [FieldOffset(0)] public HardwareInput hardware;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MouseInput
+        {
+            public int dx;
+            public int dy;
+            public uint mouseData;
+            public uint flags;
+            public uint time;
+            public IntPtr extraInfo;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct KeyboardInput
+        {
+            public ushort virtualKey;
+            public ushort scanCode;
+            public uint flags;
+            public uint time;
+            public IntPtr extraInfo;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct HardwareInput
+        {
+            public uint message;
+            public ushort lowParam;
+            public ushort highParam;
         }
 
         private const uint SWP_SHOWWINDOW = 0x0040;
@@ -81,8 +165,11 @@ namespace ProjectorDash
         private const uint WM_CLOSE = 0x0010;
         private const uint WM_SYSCOMMAND = 0x0112;
         private const int SC_MONITORPOWER = 0xF170;
+        private const uint INPUT_KEYBOARD = 1;
+        private const uint KEYEVENTF_KEYUP = 0x0002;
         private static readonly IntPtr HwndBroadcast = new IntPtr(0xFFFF);
         private static readonly IntPtr HwndTopmost = new IntPtr(-1);
+        private const string ShortcutProperty = "ProjectorDash.Shortcut";
 
         public static int ScreenCount()
         {
@@ -157,6 +244,21 @@ namespace ProjectorDash
             int y = work.Top + 12;
             SetWindowPos(hwnd, HwndTopmost, x, y, width, height,
                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        }
+
+        /// <summary>Centers the shared touch remote below the return strip.</summary>
+        public static void PlaceRemoteOverlay(Window window, Screen screen,
+            int requestedWidth, int requestedHeight)
+        {
+            if (window == null || screen == null) return;
+            IntPtr hwnd = new WindowInteropHelper(window).EnsureHandle();
+            System.Drawing.Rectangle work = screen.WorkingArea;
+            int width = Math.Min(requestedWidth, Math.Max(320, work.Width - 24));
+            int height = Math.Min(requestedHeight, Math.Max(240, work.Height - 24));
+            int x = work.Left + Math.Max(12, (work.Width - width) / 2);
+            int y = work.Top + Math.Min(104, Math.Max(12, work.Height - height - 12));
+            SetWindowPos(hwnd, HwndTopmost, x, y, width, height,
+                SWP_SHOWWINDOW);
         }
 
         /// <summary>
@@ -244,6 +346,97 @@ namespace ProjectorDash
                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
                 ShowWindow(hwnd, SW_MAXIMIZE);
             }
+        }
+
+        /// <summary>
+        /// Restores, places, and activates a tracked shortcut window. This is
+        /// the reuse path for an already-open tile, so tapping it never starts
+        /// a duplicate browser window or app instance.
+        /// </summary>
+        public static bool BringAppWindowToFront(IntPtr hwnd, Screen screen,
+            bool fullscreen)
+        {
+            if (hwnd == IntPtr.Zero || screen == null || !IsWindow(hwnd)) return false;
+            ShowWindow(hwnd, SW_RESTORE);
+            PlaceExternalWindow(hwnd, screen, fullscreen);
+            BringWindowToTop(hwnd);
+            return SetForegroundWindow(hwnd);
+        }
+
+        public static void TagShortcutWindow(IntPtr hwnd, int shortcutToken)
+        {
+            if (hwnd == IntPtr.Zero || shortcutToken == 0 || !IsWindow(hwnd)) return;
+            SetProp(hwnd, ShortcutProperty, new IntPtr(shortcutToken));
+        }
+
+        public static IntPtr FindTaggedShortcutWindow(int shortcutToken)
+        {
+            if (shortcutToken == 0) return IntPtr.Zero;
+            IntPtr found = IntPtr.Zero;
+            EnumWindows(delegate(IntPtr hwnd, IntPtr unused)
+            {
+                if (GetProp(hwnd, ShortcutProperty).ToInt64() == shortcutToken)
+                {
+                    found = hwnd;
+                    return false;
+                }
+                return true;
+            }, IntPtr.Zero);
+            return found;
+        }
+
+        public static void UntagShortcutWindow(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero || !IsWindow(hwnd)) return;
+            RemoveProp(hwnd, ShortcutProperty);
+        }
+
+        /// <summary>Sends one ordinary virtual key to the selected app.</summary>
+        public static bool SendVirtualKey(IntPtr hwnd, int virtualKey)
+        {
+            if (hwnd == IntPtr.Zero || !IsWindow(hwnd) ||
+                virtualKey < 1 || virtualKey > 255) return false;
+            BringWindowToTop(hwnd);
+            SetForegroundWindow(hwnd);
+            // The remote click temporarily owns foreground input. A tiny wait
+            // gives Windows time to return focus to the selected app before
+            // emitting the key pair.
+            System.Threading.Thread.Sleep(35);
+            NativeInput[] inputs = new NativeInput[2];
+            inputs[0].type = INPUT_KEYBOARD;
+            inputs[0].data.keyboard.virtualKey = (ushort)virtualKey;
+            inputs[1].type = INPUT_KEYBOARD;
+            inputs[1].data.keyboard.virtualKey = (ushort)virtualKey;
+            inputs[1].data.keyboard.flags = KEYEVENTF_KEYUP;
+            return SendInput(2, inputs,
+                Marshal.SizeOf(typeof(NativeInput))) == 2;
+        }
+
+        /// <summary>
+        /// Returns a stable identifier while an ordinary app on the selected
+        /// screen owns a native text caret. Chromium exposes its focused edit
+        /// control through this Windows thread state, allowing the dashboard
+        /// to summon OSK without polling page contents or injecting scripts.
+        /// </summary>
+        public static string ForegroundTextInputKey(Screen screen,
+            int excludedProcessId)
+        {
+            if (screen == null) return "";
+            IntPtr foreground = GetForegroundWindow();
+            if (foreground == IntPtr.Zero || !IsWindow(foreground) ||
+                !WindowIsOnScreen(foreground, screen)) return "";
+
+            uint processId;
+            uint threadId = GetWindowThreadProcessId(foreground, out processId);
+            if (threadId == 0 || (int)processId == excludedProcessId) return "";
+            GuiThreadInfo info = new GuiThreadInfo();
+            info.cbSize = Marshal.SizeOf(typeof(GuiThreadInfo));
+            if (!GetGUIThreadInfo(threadId, ref info) ||
+                info.hwndCaret == IntPtr.Zero) return "";
+            IntPtr focus = info.hwndFocus == IntPtr.Zero
+                ? foreground : info.hwndFocus;
+            return processId.ToString() + ":" + focus.ToInt64().ToString() +
+                ":" + info.hwndCaret.ToInt64().ToString();
         }
 
         /// <summary>

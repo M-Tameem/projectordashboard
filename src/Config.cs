@@ -7,6 +7,10 @@ namespace ProjectorDash
 {
     public class ShortcutItem
     {
+        // Stable per-tile identity. The dashboard also tags the launched HWND
+        // with a compact token derived from this id, so an already-open tile
+        // can be recovered after a dashboard/theme/mode restart.
+        public string Id = "";
         public string Name;
         public string Target;   // http(s) URL, .exe path, document, or anything ShellExecute understands
         public string Args;     // optional command-line arguments
@@ -31,6 +35,7 @@ namespace ProjectorDash
 
         public ShortcutItem(string name, string target)
         {
+            Id = Guid.NewGuid().ToString("N");
             Name = name;
             Target = target;
             Args = "";
@@ -190,6 +195,7 @@ namespace ProjectorDash
                         changed = true;
                     }
                     changed |= RemoveEmptyShortcuts(cfg.Shortcuts);
+                    changed |= EnsureShortcutIds(cfg.Shortcuts);
                     changed |= MigrateGpuCompat(cfg.Shortcuts);
                     changed |= EnsureBuiltInShortcuts(cfg.Shortcuts);
                     // One-time migration from the original touch-pad default.
@@ -382,6 +388,24 @@ namespace ProjectorDash
                 item.GpuDisableVsync = true;
                 item.GpuCompat = false;
                 changed = true;
+            }
+            return changed;
+        }
+
+        private static bool EnsureShortcutIds(List<ShortcutItem> list)
+        {
+            bool changed = false;
+            HashSet<string> used = new HashSet<string>(
+                StringComparer.OrdinalIgnoreCase);
+            foreach (ShortcutItem item in list)
+            {
+                if (item == null) continue;
+                if (string.IsNullOrEmpty(item.Id) || used.Contains(item.Id))
+                {
+                    item.Id = Guid.NewGuid().ToString("N");
+                    changed = true;
+                }
+                used.Add(item.Id);
             }
             return changed;
         }

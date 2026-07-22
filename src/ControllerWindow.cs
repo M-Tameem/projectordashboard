@@ -9,6 +9,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Interop;
+using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Shapes;
 using System.Windows.Threading;
@@ -28,12 +29,15 @@ namespace ProjectorDash
         private ProjectorWindow _projector;
         private ProjectorDimmerWindow _projectorDimmer;
         private ReturnOverlayWindow _returnOverlay;
+        private RemoteControlWindow _remoteWindow;
         private MirrorWindow _fullscreenMirror;
         private readonly DwmWindowMirror _previewMirror = new DwmWindowMirror();
         private DispatcherTimer _clockTimer;
         private DispatcherTimer _alarmSoundTimer;
         private AudioEndpoint.AlarmAudioState _alarmAudioState;
         private IntPtr _lastLaunchedWindow = IntPtr.Zero;
+        private readonly Dictionary<ShortcutItem, IntPtr> _shortcutWindows =
+            new Dictionary<ShortcutItem, IntPtr>();
         private int _launchGeneration;
         private int _audioRefreshCounter;
         private DateTime _lastAlarmDate = DateTime.MinValue;
@@ -51,6 +55,10 @@ namespace ProjectorDash
         private bool _skyRefreshBusy;
         private CancellationTokenSource _skyRefreshCancellation;
         private int _skyRefreshGeneration;
+        private DispatcherTimer _keyboardOpenTimer;
+        private DateTime _lastKeyboardRequestUtc = DateTime.MinValue;
+        private string _externalTextFocusKey = "";
+        private int _externalTextFocusMisses;
 
         // Layout pieces that depend on config / DPI
         private RowDefinition _bottomRow;
@@ -82,7 +90,7 @@ namespace ProjectorDash
         private Popup _aircraftRangePopup;
         private TextBlock _aircraftRangePendingText;
         private int _pendingAircraftRadiusKm;
-        private TextBox _autoLockTime;
+        private TextBlock _autoLockTimePickerText;
         private bool _suppressSliderEvents;
         private bool _updateBusy;
         private TextBlock _weatherTempText;
@@ -130,7 +138,7 @@ namespace ProjectorDash
         private Button _launchModeBtn;
         private Button _tabletModeBtn;
         private Button _alarmToggleBtn;
-        private TextBox _editAlarmTime;
+        private TextBlock _alarmTimePickerText;
         private ComboBox _audioDeviceCombo;
         private ComboBox _alarmDeviceCombo;
         private TextBlock _audioDeviceStatus;
@@ -174,6 +182,8 @@ namespace ProjectorDash
             ResizeMode = ResizeMode.NoResize;
 
             Content = BuildLayout();
+            AddHandler(Keyboard.GotKeyboardFocusEvent,
+                new KeyboardFocusChangedEventHandler(OnTextInputFocused), true);
 
             SourceInitialized += OnSourceInitialized;
             Loaded += OnLoadedOnce;
@@ -241,6 +251,11 @@ namespace ProjectorDash
                 try { _returnOverlay.Close(); }
                 catch { }
             }
+            if (_remoteWindow != null)
+            {
+                try { _remoteWindow.Close(); }
+                catch { }
+            }
             if (_fullscreenMirror != null)
             {
                 try { _fullscreenMirror.Close(); }
@@ -282,6 +297,8 @@ namespace ProjectorDash
                 RefreshWeather();
             CheckAlarm(now);
             CheckAutoLock(now);
+            RefreshShortcutStates();
+            CheckAutomaticKeyboard();
             _audioRefreshCounter++;
             if (_audioRefreshCounter >= 5 &&
                 (_alarmOverlay == null || _alarmOverlay.Visibility != Visibility.Visible))
@@ -325,6 +342,12 @@ namespace ProjectorDash
                 try { _projector.Close(); }
                 catch { }
                 _projector = null;
+            }
+            if (_remoteWindow != null)
+            {
+                try { _remoteWindow.Close(); }
+                catch { }
+                _remoteWindow = null;
             }
 
             Background = Ui.BgGradient();
@@ -434,14 +457,12 @@ namespace ProjectorDash
                 : "Show a live copy of the current projector window without opening another tab.";
             actions.Children.Add(_previewBtn);
 
-            _colorThemeBtn = Ui.HeaderBtn("Color " + Ui.ThemeName,
-                delegate { CycleColorTheme(); });
-            _colorThemeBtn.MinWidth = 100;
-            _colorThemeBtn.ToolTip = "Change the palette across the tablet, projector idle screen, and sky map.";
-            actions.Children.Add(_colorThemeBtn);
+            Button remote = Ui.HeaderBtn("Remote", delegate { OpenRemote(); });
+            remote.ToolTip = "Playback, volume, fullscreen, escape, enter, and keyboard controls for the current app.";
+            actions.Children.Add(remote);
 
             Button tools = Ui.HeaderBtn("Tools", delegate { OpenAutoLockPopup(); });
-            tools.ToolTip = "Keyboard, Windows desktop, and daily auto-lock.";
+            tools.ToolTip = "Keyboard, color, Windows desktop, and daily auto-lock.";
             actions.Children.Add(tools);
             _autoLockPopup = BuildAutoLockPopup(tools);
 
@@ -954,7 +975,7 @@ namespace ProjectorDash
             StackPanel panel = new StackPanel();
             TextBlock title = SectionTitle("Tools");
             panel.Children.Add(title);
-            StackPanel quick = new StackPanel
+            WrapPanel quick = new WrapPanel
             {
                 Orientation = Orientation.Horizontal,
                 Margin = new Thickness(0, 10, 0, 12)
@@ -970,22 +991,39 @@ namespace ProjectorDash
                 if (_cfg.TabletOnlyMode) EnterTabletAppMode();
                 else WindowState = WindowState.Minimized;
             }));
+            _colorThemeBtn = SmallBtn("Color: " + Ui.ThemeName,
+                delegate
+                {
+                    popup.IsOpen = false;
+                    CycleColorTheme();
+                });
+            _colorThemeBtn.ToolTip = "Change the palette across the tablet, projector idle screen, and sky map.";
+            quick.Children.Add(_colorThemeBtn);
             panel.Children.Add(quick);
             panel.Children.Add(SectionTitle("Daily tablet auto-lock"));
             panel.Children.Add(WrappedNote(
                 "Locks Windows at this time every day—the same as pressing Win+L."));
 
-            StackPanel row = new StackPanel();
-            row.Orientation = Orientation.Horizontal;
-            row.Margin = new Thickness(0, 12, 0, 0);
-            _autoLockTime = Ui.Input("1:00 AM", 17);
-            _autoLockTime.Width = 130;
-            row.Children.Add(_autoLockTime);
-            Button save = Ui.Btn("Save", 16, Ui.Accent, Ui.Ink,
-                delegate { SaveAutoLockTime(); });
-            save.Margin = new Thickness(10, 0, 0, 0);
-            row.Children.Add(save);
-            panel.Children.Add(row);
+            _autoLockTimePickerText = Ui.Label("1:00 AM", 29, Ui.Text);
+            _autoLockTimePickerText.FontFamily = new FontFamily(Ui.FontLight);
+            _autoLockTimePickerText.Margin = new Thickness(0, 8, 0, 6);
+            panel.Children.Add(_autoLockTimePickerText);
+            WrapPanel lockTimeButtons = new WrapPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Margin = new Thickness(0, 0, 0, 8)
+            };
+            lockTimeButtons.Children.Add(TimeStepBtn("HOUR −",
+                delegate { ChangeAutoLockTime(-60); }));
+            lockTimeButtons.Children.Add(TimeStepBtn("HOUR +",
+                delegate { ChangeAutoLockTime(60); }));
+            lockTimeButtons.Children.Add(TimeStepBtn("5 MIN −",
+                delegate { ChangeAutoLockTime(-5); }));
+            lockTimeButtons.Children.Add(TimeStepBtn("5 MIN +",
+                delegate { ChangeAutoLockTime(5); }));
+            lockTimeButtons.Children.Add(TimeStepBtn("AM / PM",
+                delegate { ChangeAutoLockTime(12 * 60); }));
+            panel.Children.Add(lockTimeButtons);
 
             _autoLockToggleBtn = Ui.Btn("Auto-lock: Off", 16, Ui.Panel, Ui.Text,
                 delegate { ToggleAutoLock(); });
@@ -1244,12 +1282,26 @@ namespace ProjectorDash
             foreach (ShortcutItem s in _cfg.Shortcuts)
             {
                 ShortcutItem item = s; // capture per iteration
-                string detail = item.HideTarget ? "private shortcut" :
+                bool active = ShortcutIsActive(item);
+                string baseDetail = item.HideTarget ? "private shortcut" :
                     (item.IsWeb() ? ShortHost(item.Target) : "app");
+                string detail = active ? "ON · " + baseDetail : baseDetail;
                 ImageSource icon = item.IsWeb() && !item.HideTarget
                     ? SiteIconCache.TryLoad(item.Target) : null;
-                _tilePanel.Children.Add(Ui.Tile(item.Name, detail, icon,
-                    delegate { Launch(item); }));
+                Button tile = Ui.Tile(item.Name, detail, icon,
+                    delegate { Launch(item); });
+                if (active)
+                {
+                    tile.Background = Ui.AccentDim;
+                    tile.BorderBrush = Ui.Accent;
+                    tile.BorderThickness = new Thickness(2);
+                    tile.ToolTip = "ON · tap to bring this existing window back to the front.";
+                }
+                else
+                {
+                    tile.ToolTip = "Tap to open this shortcut.";
+                }
+                _tilePanel.Children.Add(tile);
                 if (item.IsWeb() && !item.HideTarget && icon == null)
                 {
                     SiteIconCache.EnsureCached(item.Target, delegate
@@ -1263,6 +1315,113 @@ namespace ProjectorDash
             add.Background = Ui.SurfaceLow;
             add.BorderBrush = Ui.Line;
             _tilePanel.Children.Add(add);
+        }
+
+        private bool ShortcutIsActive(ShortcutItem item)
+        {
+            IntPtr hwnd;
+            if (!_shortcutWindows.TryGetValue(item, out hwnd))
+            {
+                hwnd = ScreenUtil.FindTaggedShortcutWindow(
+                    ShortcutWindowToken(item));
+                if (hwnd == IntPtr.Zero || !ScreenUtil.IsWindow(hwnd)) return false;
+                _shortcutWindows[item] = hwnd;
+            }
+            if (ScreenUtil.IsWindow(hwnd)) return true;
+            _shortcutWindows.Remove(item);
+            return false;
+        }
+
+        private static int ShortcutWindowToken(ShortcutItem item)
+        {
+            string id = item == null ? "" : (item.Id ?? "");
+            if (id.Length == 0 && item != null)
+                id = (item.Name ?? "") + "\n" + (item.Target ?? "");
+            unchecked
+            {
+                uint hash = 2166136261;
+                for (int i = 0; i < id.Length; i++)
+                {
+                    hash ^= id[i];
+                    hash *= 16777619;
+                }
+                int token = (int)(hash & 0x7FFFFFFF);
+                return token == 0 ? 1 : token;
+            }
+        }
+
+        private void RegisterShortcutWindow(ShortcutItem item, IntPtr hwnd)
+        {
+            if (item == null || hwnd == IntPtr.Zero || !ScreenUtil.IsWindow(hwnd)) return;
+            IntPtr existing;
+            if (_shortcutWindows.TryGetValue(item, out existing) && existing == hwnd) return;
+            if (existing != IntPtr.Zero && existing != hwnd)
+                ScreenUtil.UntagShortcutWindow(existing);
+            _shortcutWindows[item] = hwnd;
+            ScreenUtil.TagShortcutWindow(hwnd, ShortcutWindowToken(item));
+            RebuildTiles();
+        }
+
+        private void RefreshShortcutStates()
+        {
+            if (_shortcutWindows.Count == 0) return;
+            List<ShortcutItem> closed = new List<ShortcutItem>();
+            foreach (KeyValuePair<ShortcutItem, IntPtr> pair in _shortcutWindows)
+            {
+                if (!ScreenUtil.IsWindow(pair.Value)) closed.Add(pair.Key);
+            }
+            if (closed.Count == 0) return;
+            foreach (ShortcutItem item in closed) _shortcutWindows.Remove(item);
+            RebuildTiles();
+        }
+
+        private bool ActivateOpenShortcut(ShortcutItem item,
+            WinForms.Screen target)
+        {
+            IntPtr hwnd;
+            if (!ShortcutIsActive(item) ||
+                !_shortcutWindows.TryGetValue(item, out hwnd)) return false;
+            if (!ScreenUtil.IsWindow(hwnd))
+            {
+                _shortcutWindows.Remove(item);
+                RebuildTiles();
+                return false;
+            }
+            _lastLaunchedWindow = hwnd;
+            ScreenUtil.BringAppWindowToFront(hwnd, target, _cfg.LaunchFullscreen);
+            if (_cfg.TabletOnlyMode) EnterTabletAppMode();
+            return true;
+        }
+
+        private void ForgetShortcutWindow(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero) return;
+            List<ShortcutItem> matches = new List<ShortcutItem>();
+            foreach (KeyValuePair<ShortcutItem, IntPtr> pair in _shortcutWindows)
+                if (pair.Value == hwnd) matches.Add(pair.Key);
+            if (matches.Count == 0) return;
+            ScreenUtil.UntagShortcutWindow(hwnd);
+            foreach (ShortcutItem item in matches) _shortcutWindows.Remove(item);
+            RebuildTiles();
+        }
+
+        private void ForgetShortcutAssociation(ShortcutItem item)
+        {
+            if (item == null) return;
+            IntPtr hwnd;
+            if (_shortcutWindows.TryGetValue(item, out hwnd))
+                ScreenUtil.UntagShortcutWindow(hwnd);
+            _shortcutWindows.Remove(item);
+        }
+
+        private void ForgetBrowserShortcutWindows()
+        {
+            List<ShortcutItem> web = new List<ShortcutItem>();
+            foreach (KeyValuePair<ShortcutItem, IntPtr> pair in _shortcutWindows)
+                if (pair.Key.IsWeb()) web.Add(pair.Key);
+            if (web.Count == 0) return;
+            foreach (ShortcutItem item in web) _shortcutWindows.Remove(item);
+            RebuildTiles();
         }
 
         private static string ShortHost(string url)
@@ -1284,6 +1443,7 @@ namespace ProjectorDash
                 if (_projectorSleeping) WakeProjector();
                 WinForms.Screen projector = GetProjectorScreen(true);
                 if (projector == null) return;
+                if (ActivateOpenShortcut(item, projector)) return;
 
                 ProcessStartInfo psi = new ProcessStartInfo();
                 string expectedExe = item.Target;
@@ -1322,7 +1482,7 @@ namespace ProjectorDash
                     catch { }
                     started.Dispose();
                 }
-                BeginProjectorPlacement(before, processId, expectedExe, projector);
+                BeginProjectorPlacement(before, processId, expectedExe, projector, item);
                 if (_cfg.TabletOnlyMode) EnterTabletAppMode();
             }
             catch (Exception ex)
@@ -1353,6 +1513,7 @@ namespace ProjectorDash
                 WinForms.Screen projector = GetProjectorScreen(true);
                 if (projector == null) return;
 
+                ForgetBrowserShortcutWindows();
                 StopBrowserProcesses(path);
 
                 ProcessStartInfo psi = new ProcessStartInfo();
@@ -1371,7 +1532,7 @@ namespace ProjectorDash
                     try { processId = started.Id; } catch { }
                     started.Dispose();
                 }
-                BeginProjectorPlacement(before, processId, path, projector);
+                BeginProjectorPlacement(before, processId, path, projector, null);
                 if (_cfg.TabletOnlyMode) EnterTabletAppMode();
             }
             catch (Exception ex)
@@ -1762,8 +1923,65 @@ namespace ProjectorDash
             if (_returnOverlay != null) return;
             _returnOverlay = new ReturnOverlayWindow(tablet,
                 delegate { ReturnToDashboard(); },
+                delegate { OpenRemote(); },
                 delegate { SleepTabletDisplay(); },
                 delegate { EmergencyOff(); });
+        }
+
+        private void OpenRemote()
+        {
+            WinForms.Screen tablet = ScreenUtil.FindByDevice(
+                _cfg.TabletDevice, WinForms.Screen.PrimaryScreen);
+            if (_remoteWindow == null)
+            {
+                _remoteWindow = new RemoteControlWindow(tablet,
+                    delegate(int key) { SendRemoteKey(key); },
+                    delegate(int delta) { AdjustRemoteVolume(delta); },
+                    delegate { ToggleRemoteMute(); },
+                    delegate { ShowTouchKeyboard(); });
+            }
+            if (!_remoteWindow.IsVisible) _remoteWindow.Show();
+            _remoteWindow.Topmost = true;
+            _remoteWindow.Activate();
+        }
+
+        private IntPtr CurrentRemoteTarget()
+        {
+            WinForms.Screen target = GetProjectorScreen(false);
+            if (target == null) return IntPtr.Zero;
+            if (ScreenUtil.IsWindow(_lastLaunchedWindow) &&
+                ScreenUtil.WindowIsOnScreen(_lastLaunchedWindow, target))
+                return _lastLaunchedWindow;
+            return ScreenUtil.FindTopAppWindowOnScreen(target,
+                GetCurrentProcessId());
+        }
+
+        private void SendRemoteKey(int virtualKey)
+        {
+            if (_projectorSleeping) WakeProjector();
+            IntPtr hwnd = CurrentRemoteTarget();
+            if (hwnd == IntPtr.Zero) return;
+            WinForms.Screen target = GetProjectorScreen(false);
+            ScreenUtil.BringAppWindowToFront(hwnd, target, _cfg.LaunchFullscreen);
+            ScreenUtil.SendVirtualKey(hwnd, virtualKey);
+            _lastLaunchedWindow = hwnd;
+        }
+
+        private void AdjustRemoteVolume(int delta)
+        {
+            int volume = _audio.GetVolume() + delta;
+            if (volume < 0) volume = 0;
+            if (volume > 100) volume = 100;
+            _audio.SetVolume(volume);
+            if (volume > 0 && _audio.GetMute()) _audio.SetMute(false);
+            SyncAudioUi();
+            UpdateMuteButton();
+        }
+
+        private void ToggleRemoteMute()
+        {
+            _audio.SetMute(!_audio.GetMute());
+            UpdateMuteButton();
         }
 
         private void SleepTabletDisplay()
@@ -1832,6 +2050,7 @@ namespace ProjectorDash
             string browser = _cfg.BrowserPath;
             if (string.IsNullOrEmpty(browser)) browser = AppConfig.DetectSupermium();
             StopBrowserProcesses(browser);
+            ForgetBrowserShortcutWindows();
             ClosePreview();
             _mirrorFullscreen = false;
             if (_fullscreenMirror != null)
@@ -1841,6 +2060,7 @@ namespace ProjectorDash
                 _fullscreenMirror = null;
             }
             if (_returnOverlay != null) _returnOverlay.Hide();
+            if (_remoteWindow != null) _remoteWindow.Hide();
             _tabletAppMode = false;
 
             // Lock before powering down so waking a screen never exposes the
@@ -1857,8 +2077,48 @@ namespace ProjectorDash
             powerOff.Start();
         }
 
+        private void OnTextInputFocused(object sender,
+            KeyboardFocusChangedEventArgs e)
+        {
+            if (e.NewFocus is TextBox) QueueTouchKeyboard();
+        }
+
+        private void CheckAutomaticKeyboard()
+        {
+            WinForms.Screen target = GetProjectorScreen(false);
+            string key = ScreenUtil.ForegroundTextInputKey(target,
+                GetCurrentProcessId());
+            if (string.IsNullOrEmpty(key))
+            {
+                _externalTextFocusMisses++;
+                if (_externalTextFocusMisses >= 2) _externalTextFocusKey = "";
+                return;
+            }
+            _externalTextFocusMisses = 0;
+            if (key == _externalTextFocusKey) return;
+            _externalTextFocusKey = key;
+            QueueTouchKeyboard();
+        }
+
+        private void QueueTouchKeyboard()
+        {
+            if ((DateTime.UtcNow - _lastKeyboardRequestUtc).TotalSeconds < 1.5)
+                return;
+            if (_keyboardOpenTimer != null) _keyboardOpenTimer.Stop();
+            _keyboardOpenTimer = new DispatcherTimer();
+            _keyboardOpenTimer.Interval = TimeSpan.FromMilliseconds(180);
+            _keyboardOpenTimer.Tick += delegate
+            {
+                _keyboardOpenTimer.Stop();
+                _lastKeyboardRequestUtc = DateTime.UtcNow;
+                ShowTouchKeyboard();
+            };
+            _keyboardOpenTimer.Start();
+        }
+
         private void ShowTouchKeyboard()
         {
+            _lastKeyboardRequestUtc = DateTime.UtcNow;
             try
             {
                 // The docked TabTip spans the bottom of the tablet and fights
@@ -1938,7 +2198,7 @@ namespace ProjectorDash
         }
 
         private void BeginProjectorPlacement(HashSet<IntPtr> before, int processId,
-            string expectedExe, WinForms.Screen projector)
+            string expectedExe, WinForms.Screen projector, ShortcutItem shortcut)
         {
             int generation = ++_launchGeneration;
             int ticks = 0;
@@ -1969,6 +2229,7 @@ namespace ProjectorDash
                         stableTicks++;
                     }
                     _lastLaunchedWindow = tracked;
+                    if (shortcut != null) RegisterShortcutWindow(shortcut, tracked);
                     ScreenUtil.PlaceExternalWindow(tracked, projector, _cfg.LaunchFullscreen);
                     if (!_cfg.TabletOnlyMode) Activate();
 
@@ -2084,6 +2345,11 @@ namespace ProjectorDash
                     ? "There isn't another app open on the tablet."
                     : "There isn't an app open on the projector.",
                     "Projector Dashboard");
+            }
+            else
+            {
+                ForgetShortcutWindow(hwnd);
+                if (_lastLaunchedWindow == hwnd) _lastLaunchedWindow = IntPtr.Zero;
             }
             if (_cfg.TabletOnlyMode) ReturnToDashboard();
             else Activate();
@@ -2431,19 +2697,33 @@ namespace ProjectorDash
             Grid page = TwoColumnSettingsPage();
             StackPanel left = new StackPanel();
             left.Children.Add(SectionTitle("Daily alarm"));
-            StackPanel timeRow = new StackPanel { Orientation = Orientation.Horizontal,
-                Margin = new Thickness(0, 8, 0, 8) };
-            _editAlarmTime = Ui.Input("8:00 AM", 17);
-            _editAlarmTime.Width = 135;
-            timeRow.Children.Add(_editAlarmTime);
-            Button save = SmallBtn("Save time", delegate { SaveAlarmTime(); });
-            save.Margin = new Thickness(10, 0, 0, 0);
-            timeRow.Children.Add(save);
+            _alarmTimePickerText = Ui.Label("8:00 AM", 40, Ui.Text);
+            _alarmTimePickerText.FontFamily = new FontFamily(Ui.FontLight);
+            _alarmTimePickerText.Margin = new Thickness(0, 6, 0, 8);
+            left.Children.Add(_alarmTimePickerText);
+
+            WrapPanel timeButtons = new WrapPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Margin = new Thickness(0, 0, 0, 8)
+            };
+            timeButtons.Children.Add(TimeStepBtn("HOUR  −",
+                delegate { ChangeAlarmTime(-60); }));
+            timeButtons.Children.Add(TimeStepBtn("HOUR  +",
+                delegate { ChangeAlarmTime(60); }));
+            timeButtons.Children.Add(TimeStepBtn("5 MIN  −",
+                delegate { ChangeAlarmTime(-5); }));
+            timeButtons.Children.Add(TimeStepBtn("5 MIN  +",
+                delegate { ChangeAlarmTime(5); }));
+            timeButtons.Children.Add(TimeStepBtn("AM / PM",
+                delegate { ChangeAlarmTime(12 * 60); }));
+            left.Children.Add(timeButtons);
+
             _alarmToggleBtn = SmallBtn("Alarm: Off", delegate { ToggleAlarm(); });
-            timeRow.Children.Add(_alarmToggleBtn);
-            left.Children.Add(timeRow);
+            _alarmToggleBtn.MinWidth = 150;
+            left.Children.Add(_alarmToggleBtn);
             left.Children.Add(WrappedNote(
-                "The alarm repeats daily while the dashboard is awake and includes Dismiss and 10-minute Snooze."));
+                "Tap the large controls to set the time—no typing required. Changes save immediately. The alarm repeats daily while the dashboard is awake and includes Dismiss and 10-minute Snooze."));
             page.Children.Add(left);
 
             StackPanel right = new StackPanel();
@@ -3264,6 +3544,14 @@ namespace ProjectorDash
             return b;
         }
 
+        private Button TimeStepBtn(string text, RoutedEventHandler click)
+        {
+            Button b = SmallBtn(text, click);
+            b.MinWidth = 98;
+            b.Margin = new Thickness(0, 0, 8, 8);
+            return b;
+        }
+
         private TextBlock FieldLabel(string text)
         {
             TextBlock t = Ui.Label(text, 15, Ui.TextDim);
@@ -3367,6 +3655,8 @@ namespace ProjectorDash
         {
             int i = _shortcutList.SelectedIndex;
             if (i < 0 || i >= _cfg.Shortcuts.Count) return;
+            ShortcutItem removed = _cfg.Shortcuts[i];
+            ForgetShortcutAssociation(removed);
             _cfg.Shortcuts.RemoveAt(i);
             _cfg.Save();
             RefreshShortcutList(Math.Min(i, _cfg.Shortcuts.Count - 1));
@@ -3399,10 +3689,17 @@ namespace ProjectorDash
                     "Projector Dashboard");
                 return;
             }
+            string newTarget = _editTarget.Text.Trim();
+            string newArgs = _editArgs.Text.Trim();
+            if (!string.Equals(s.Target ?? "", newTarget,
+                StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(s.Args ?? "", newArgs,
+                StringComparison.Ordinal))
+                ForgetShortcutAssociation(s);
             s.Name = string.IsNullOrEmpty(_editName.Text.Trim())
                 ? "Shortcut" : _editName.Text.Trim();
-            s.Target = _editTarget.Text.Trim();
-            s.Args = _editArgs.Text.Trim();
+            s.Target = newTarget;
+            s.Args = newArgs;
             _cfg.Save();
             RefreshShortcutList(i);
             RebuildTiles();
@@ -3416,6 +3713,7 @@ namespace ProjectorDash
                 string target = (_cfg.Shortcuts[i].Target ?? "").Trim();
                 if (target.Length == 0 || target == "https://" || target == "http://")
                 {
+                    ForgetShortcutAssociation(_cfg.Shortcuts[i]);
                     _cfg.Shortcuts.RemoveAt(i);
                     changed = true;
                 }
@@ -3545,22 +3843,17 @@ namespace ProjectorDash
             UpdateAutoLockUi();
         }
 
-        private void SaveAutoLockTime()
+        private void ChangeAutoLockTime(int deltaMinutes)
         {
-            DateTime parsed;
-            if (_autoLockTime == null ||
-                !DateTime.TryParse(_autoLockTime.Text.Trim(), out parsed))
-            {
-                MessageBox.Show(this, "Enter a time like 1:00 AM or 23:00.",
-                    "Projector Dashboard");
-                return;
-            }
-            _cfg.AutoLockHour = parsed.Hour;
-            _cfg.AutoLockMinute = parsed.Minute;
+            int minutes = (_cfg.AutoLockHour * 60) +
+                _cfg.AutoLockMinute + deltaMinutes;
+            minutes %= 24 * 60;
+            if (minutes < 0) minutes += 24 * 60;
+            _cfg.AutoLockHour = minutes / 60;
+            _cfg.AutoLockMinute = minutes % 60;
             _cfg.Save();
             _lastAutoLockDate = DateTime.MinValue;
             UpdateAutoLockUi();
-            if (_autoLockPopup != null) _autoLockPopup.IsOpen = false;
         }
 
         private void UpdateAutoLockUi()
@@ -3569,7 +3862,8 @@ namespace ProjectorDash
                 .AddMinutes(_cfg.AutoLockMinute);
             string label = _cfg.AutoLockEnabled
                 ? "Auto-lock: " + time.ToString("h:mm tt") : "Auto-lock: Off";
-            if (_autoLockTime != null) _autoLockTime.Text = time.ToString("h:mm tt");
+            if (_autoLockTimePickerText != null)
+                _autoLockTimePickerText.Text = time.ToString("h:mm tt");
             if (_autoLockBtn != null)
             {
                 _autoLockBtn.Content = label;
@@ -3599,21 +3893,16 @@ namespace ProjectorDash
             }
         }
 
-        private void SaveAlarmTime()
+        private void ChangeAlarmTime(int deltaMinutes)
         {
-            DateTime parsed;
-            if (_editAlarmTime == null ||
-                !DateTime.TryParse(_editAlarmTime.Text.Trim(), out parsed))
-            {
-                MessageBox.Show(this,
-                    "Enter a time like 7:30 AM or 19:30.",
-                    "Projector Dashboard");
-                return;
-            }
-            _cfg.AlarmHour = parsed.Hour;
-            _cfg.AlarmMinute = parsed.Minute;
+            int minutes = (_cfg.AlarmHour * 60) + _cfg.AlarmMinute + deltaMinutes;
+            minutes %= 24 * 60;
+            if (minutes < 0) minutes += 24 * 60;
+            _cfg.AlarmHour = minutes / 60;
+            _cfg.AlarmMinute = minutes % 60;
             _cfg.Save();
             _lastAlarmDate = DateTime.MinValue;
+            _snoozeUntil = DateTime.MinValue;
             UpdateAlarmUi();
         }
 
@@ -3622,7 +3911,7 @@ namespace ProjectorDash
             DateTime alarmTime = DateTime.Today.AddHours(_cfg.AlarmHour)
                 .AddMinutes(_cfg.AlarmMinute);
             string time = alarmTime.ToString("h:mm tt");
-            if (_editAlarmTime != null) _editAlarmTime.Text = time;
+            if (_alarmTimePickerText != null) _alarmTimePickerText.Text = time;
             if (_alarmToggleBtn != null)
             {
                 _alarmToggleBtn.Content = _cfg.AlarmEnabled ? "Alarm: On" : "Alarm: Off";

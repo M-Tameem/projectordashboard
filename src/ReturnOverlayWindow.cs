@@ -14,10 +14,10 @@ namespace ProjectorDash
     public sealed class ReturnOverlayWindow : Window
     {
         public ReturnOverlayWindow(WinForms.Screen tablet, Action showDashboard,
-            Action sleepDisplay, Action emergencyOff)
+            Action showRemote, Action sleepDisplay, Action emergencyOff)
         {
             Title = "Dashboard return control";
-            Width = 406;
+            Width = 510;
             Height = 78;
             WindowStyle = WindowStyle.None;
             ResizeMode = ResizeMode.NoResize;
@@ -37,6 +37,8 @@ namespace ProjectorDash
             buttons.ColumnDefinitions.Add(new ColumnDefinition
                 { Width = new GridLength(1, GridUnitType.Star) });
             buttons.ColumnDefinitions.Add(new ColumnDefinition
+                { Width = new GridLength(96) });
+            buttons.ColumnDefinitions.Add(new ColumnDefinition
                 { Width = new GridLength(104) });
             buttons.ColumnDefinitions.Add(new ColumnDefinition
                 { Width = new GridLength(76) });
@@ -47,13 +49,21 @@ namespace ProjectorDash
             dashboard.Margin = new Thickness(0, 0, 7, 0);
             buttons.Children.Add(dashboard);
 
+            Button remote = Ui.Btn("REMOTE", 13, Ui.PanelHi, Ui.Text,
+                delegate { if (showRemote != null) showRemote(); });
+            remote.MinHeight = 56;
+            remote.Margin = new Thickness(0, 0, 7, 0);
+            remote.ToolTip = "Open playback, volume, fullscreen, escape, and keyboard controls.";
+            Grid.SetColumn(remote, 1);
+            buttons.Children.Add(remote);
+
             Button sleep = Ui.Btn("SCREEN OFF", 13, Ui.PanelHi, Ui.Accent,
                 delegate { if (sleepDisplay != null) sleepDisplay(); });
             sleep.MinHeight = 56;
             sleep.Margin = new Thickness(0, 0, 7, 0);
             sleep.BorderBrush = Ui.Accent;
             sleep.ToolTip = "Turn off the tablet display while audio keeps playing. Tap the screen to wake it.";
-            Grid.SetColumn(sleep, 1);
+            Grid.SetColumn(sleep, 2);
             buttons.Children.Add(sleep);
 
             Button off = Ui.Btn("OFF", 16, Ui.DangerFill, Ui.DangerText,
@@ -61,14 +71,14 @@ namespace ProjectorDash
             off.MinHeight = 56;
             off.BorderBrush = Ui.Danger;
             off.ToolTip = "Close all Supermium tabs, lock Windows, and turn off every display.";
-            Grid.SetColumn(off, 2);
+            Grid.SetColumn(off, 3);
             buttons.Children.Add(off);
 
             card.Child = buttons;
             Content = card;
             SourceInitialized += delegate
             {
-                ScreenUtil.PlaceTopRightOverlay(this, tablet, 406, 78);
+                ScreenUtil.PlaceTopRightOverlay(this, tablet, 510, 78);
             };
         }
     }
