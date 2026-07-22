@@ -426,12 +426,11 @@ namespace ProjectorDash
                 : "Hide projector apps without closing their tabs; tap again to wake.";
             actions.Children.Add(_sleepBtn);
 
-            _previewBtn = Ui.HeaderBtn("View",
-                delegate { OpenPreview(); });
-            _previewBtn.IsEnabled = !_cfg.TabletOnlyMode;
-            _previewBtn.Opacity = _cfg.TabletOnlyMode ? 0.45 : 1.0;
+            _previewBtn = _cfg.TabletOnlyMode
+                ? Ui.HeaderBtn("Screen off", delegate { SleepTabletDisplay(); })
+                : Ui.HeaderBtn("View", delegate { OpenPreview(); });
             _previewBtn.ToolTip = _cfg.TabletOnlyMode
-                ? "Preview is available when the projector is the active target."
+                ? "Turn off the tablet display while audio keeps playing. Tap the screen to wake it."
                 : "Show a live copy of the current projector window without opening another tab.";
             actions.Children.Add(_previewBtn);
 
@@ -887,15 +886,23 @@ namespace ProjectorDash
             card.CornerRadius = new CornerRadius(10);
             StackPanel panel = new StackPanel();
             panel.Children.Add(SectionTitle("Power"));
-            panel.Children.Add(WrappedNote(
-                "Signal off blanks every display. HDMI-CEC standby physically powers down a compatible projector when a CEC adapter is present."));
+            panel.Children.Add(WrappedNote(_cfg.TabletOnlyMode
+                ? "Screen sleep powers off the panel signal while Windows, playback, and audio keep running. Any touch normally wakes it."
+                : "Signal off blanks every display. HDMI-CEC standby physically powers down a compatible projector when a CEC adapter is present."));
 
             Button closeApp = Ui.Btn("Close current projector app", 15, Ui.Panel, Ui.Text,
                 delegate { popup.IsOpen = false; CloseProjectedApp(); });
             closeApp.Margin = new Thickness(0, 12, 0, 0);
             panel.Children.Add(closeApp);
-            Button signal = Ui.Btn("Turn display signals off", 15, Ui.Panel, Ui.Text,
-                delegate { popup.IsOpen = false; ScreenUtil.TurnOffAllDisplays(); });
+            Button signal = Ui.Btn(_cfg.TabletOnlyMode
+                ? "Sleep tablet screen · audio stays on"
+                : "Turn display signals off", 15, Ui.Panel, Ui.Text,
+                delegate
+                {
+                    popup.IsOpen = false;
+                    if (_cfg.TabletOnlyMode) SleepTabletDisplay();
+                    else ScreenUtil.TurnOffAllDisplays();
+                });
             signal.Margin = new Thickness(0, 8, 0, 0);
             panel.Children.Add(signal);
             Button cec = Ui.Btn("Projector standby · HDMI-CEC", 15, Ui.AccentDim, Ui.Accent,
@@ -1755,7 +1762,29 @@ namespace ProjectorDash
             if (_returnOverlay != null) return;
             _returnOverlay = new ReturnOverlayWindow(tablet,
                 delegate { ReturnToDashboard(); },
+                delegate { SleepTabletDisplay(); },
                 delegate { EmergencyOff(); });
+        }
+
+        private void SleepTabletDisplay()
+        {
+            if (!_cfg.TabletOnlyMode) return;
+            if (_powerPopup != null) _powerPopup.IsOpen = false;
+            if (_autoLockPopup != null) _autoLockPopup.IsOpen = false;
+            if (_aircraftRangePopup != null) _aircraftRangePopup.IsOpen = false;
+
+            // Wait until the activating finger/mouse button is fully released;
+            // otherwise that same input can immediately wake the panel again.
+            // This powers off only the display signal. Windows, Supermium,
+            // audio routing, playback, timers, and network activity continue.
+            DispatcherTimer screenOff = new DispatcherTimer();
+            screenOff.Interval = TimeSpan.FromMilliseconds(450);
+            screenOff.Tick += delegate
+            {
+                screenOff.Stop();
+                ScreenUtil.TurnOffAllDisplays();
+            };
+            screenOff.Start();
         }
 
         private void EnterTabletAppMode()
@@ -2309,11 +2338,20 @@ namespace ProjectorDash
             left.Children.Add(modeRow);
             left.Children.Add(WrappedNote(
                 _cfg.TabletOnlyMode
-                ? "Tablet-only launches fullscreen here and keeps a small Dashboard / emergency-off control above the app. Sleep hides the app without closing its tabs."
+                ? "Tablet-only launches fullscreen here and keeps Dashboard, Screen off, and emergency-off controls above the app. Screen off leaves playback and audio running; Hide only puts the app away without closing its tabs."
                 : "Idle hides open apps and tabs without closing them, then shows the ambient screen until you wake it."));
-            Button sleep = SmallBtn("Idle / wake now", delegate { ToggleProjectorSleep(); });
+            Button sleep = SmallBtn(_cfg.TabletOnlyMode
+                ? "Hide / restore app"
+                : "Idle / wake now", delegate { ToggleProjectorSleep(); });
             sleep.Margin = new Thickness(0, 10, 0, 0);
             left.Children.Add(sleep);
+            if (_cfg.TabletOnlyMode)
+            {
+                Button screenOff = SmallBtn("Screen off · keep audio",
+                    delegate { SleepTabletDisplay(); });
+                screenOff.Margin = new Thickness(0, 8, 0, 0);
+                left.Children.Add(screenOff);
+            }
             page.Children.Add(left);
 
             StackPanel right = new StackPanel();
