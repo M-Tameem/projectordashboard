@@ -59,6 +59,7 @@ namespace ProjectorDash
         private int _aircraftRadiusKm = 40;
         private DateTime _celestialUpdatedUtc = DateTime.MinValue;
         private List<PlanetReading> _livePlanets = new List<PlanetReading>();
+        private List<PlanetReading> _futurePlanets = new List<PlanetReading>();
         private List<StarReading> _liveStars = new List<StarReading>();
         private readonly Dictionary<string, AircraftTrack> _tracks =
             new Dictionary<string, AircraftTrack>(StringComparer.OrdinalIgnoreCase);
@@ -89,14 +90,26 @@ namespace ProjectorDash
             _facingDegrees = Normalize(facingDegrees);
             if (sky != null)
             {
+                if (!sky.ExternalFeedsEnabled)
+                {
+                    _tracks.Clear();
+                    _issTrail.Clear();
+                }
                 if (sky.AircraftRadiusKm != _aircraftRadiusKm)
                 {
                     _tracks.Clear();
                     _aircraftRadiusKm = sky.AircraftRadiusKm;
                 }
-                RecordAircraft(sky);
-                RecordIss(sky);
+                if (sky.ExternalFeedsEnabled)
+                {
+                    RecordAircraft(sky);
+                    RecordIss(sky);
+                }
                 _livePlanets = new List<PlanetReading>(sky.Planets);
+                _futurePlanets = AmbientService.CalculatePlanets(
+                    (sky.UpdatedUtc == DateTime.MinValue ? DateTime.UtcNow :
+                    sky.UpdatedUtc).AddMinutes(10), sky.ObserverLatitude,
+                    sky.ObserverLongitude);
                 _liveStars = new List<StarReading>(sky.Stars);
                 _celestialUpdatedUtc = sky.UpdatedUtc;
             }
@@ -111,6 +124,10 @@ namespace ProjectorDash
             int unnamed = 0;
             foreach (PlaneReading plane in sky.Planes)
             {
+                // ADS-B fallback samples can be cached for quota safety. Past
+                // this age, continued dead-reckoning looks convincing but is
+                // no longer trustworthy, so accuracy wins over persistence.
+                if (plane.PositionAgeSeconds > 75.0) continue;
                 string id = plane.Identifier;
                 if (string.IsNullOrWhiteSpace(id))
                     id = (plane.Label ?? "Aircraft") + "-" + (++unnamed).ToString();
@@ -123,22 +140,69 @@ namespace ProjectorDash
                     Math.Min(plane.PositionAgeSeconds, 60.0)));
 
                 AircraftTrack track;
-                if (!_tracks.TryGetValue(id, out track))
+                bool existing = _tracks.TryGetValue(id, out track);
+                if (!existing)
                 {
                     track = new AircraftTrack { Id = id };
                     _tracks.Add(id, track);
+                }
+
+                bool acceptPosition = true;
+                double acceptedCourse = Normalize(plane.TrackDegrees);
+                if (existing && track.AnchorUtc != DateTime.MinValue)
+                {
+                    double deltaSeconds = (sampleAt - track.AnchorUtc).TotalSeconds;
+                    if (deltaSeconds < -2.0)
+                    {
+                        acceptPosition = false;
+                    }
+                    else
+                    {
+                        double previousSpeed = track.HasTrack
+                            ? track.SpeedKnots * 1.852 / 3600.0 : 0.0;
+                        double previousCourse = track.TrackDegrees * Math.PI / 180.0;
+                        double predictedEast = track.AnchorEastKm + previousSpeed *
+                            Math.Sin(previousCourse) * Math.Max(0.0, deltaSeconds);
+                        double predictedNorth = track.AnchorNorthKm + previousSpeed *
+                            Math.Cos(previousCourse) * Math.Max(0.0, deltaSeconds);
+                        double errorKm = Distance(predictedEast, predictedNorth,
+                            east, north);
+                        double allowanceKm = 2.5 + previousSpeed *
+                            Math.Max(0.0, deltaSeconds) * 0.35;
+                        if (errorKm > allowanceKm) acceptPosition = false;
+
+                        double movedKm = Distance(track.AnchorEastKm,
+                            track.AnchorNorthKm, east, north);
+                        if (acceptPosition && plane.HasTrack && movedKm > 0.15)
+                        {
+                            double observedCourse = Normalize(Math.Atan2(
+                                east - track.AnchorEastKm,
+                                north - track.AnchorNorthKm) * 180.0 / Math.PI);
+                            if (Math.Abs(SignedAngle(acceptedCourse -
+                                observedCourse)) > 75.0)
+                                acceptedCourse = observedCourse;
+                        }
+                        else if (plane.HasTrack && track.HasTrack &&
+                            Math.Abs(SignedAngle(acceptedCourse -
+                                track.TrackDegrees)) > 100.0)
+                        {
+                            acceptedCourse = track.TrackDegrees;
+                        }
+                    }
                 }
                 track.Label = plane.Label;
                 track.Registration = plane.Registration;
                 track.AircraftType = plane.AircraftType;
                 track.AltitudeFeet = plane.AltitudeFeet;
-                track.TrackDegrees = Normalize(plane.TrackDegrees);
+                track.TrackDegrees = acceptedCourse;
                 track.SpeedKnots = Math.Max(0.0, plane.SpeedKnots);
                 track.HasTrack = plane.HasTrack;
+                track.LastReceivedUtc = received;
+
+                if (!acceptPosition) continue;
                 track.AnchorUtc = sampleAt;
                 track.AnchorEastKm = east;
                 track.AnchorNorthKm = north;
-                track.LastReceivedUtc = received;
 
                 bool add = track.Samples.Count == 0;
                 if (!add)
@@ -221,6 +285,10 @@ namespace ProjectorDash
 
             DateTime now = DateTime.UtcNow;
             UpdateCelestial(now);
+            DrawIssPassStatus(dc, now, center, labels);
+            if (_sky.AirportMarkersEnabled)
+                DrawAirportMarkers(dc, center, radiusX, radiusY, labels,
+                    width, height);
 
             foreach (StarReading star in _liveStars)
             {
@@ -240,7 +308,8 @@ namespace ProjectorDash
                 Point point = SkyPoint(center, radiusX, radiusY,
                     planet.BearingDegrees, planet.AltitudeDegrees);
                 Brush color = Ui.Planet;
-                dc.DrawEllipse(color, null, point, 2.5, 2.5);
+                DrawPlanetArrow(dc, planet, point, center, radiusX, radiusY,
+                    color);
                 DrawPlacedLabel(dc, planet.Name, 11, color,
                     new Point(point.X + 7, point.Y - 7), labels, width, height, false);
             }
@@ -276,14 +345,126 @@ namespace ProjectorDash
             }
         }
 
+        private void DrawIssPassStatus(DrawingContext dc, DateTime now,
+            Point center, List<Rect> labels)
+        {
+            if (_sky.Iss == null || !_sky.Iss.PassPredictionAvailable) return;
+            string text;
+            bool passActive = _sky.Iss.NextSetUtc != DateTime.MinValue &&
+                now >= _sky.Iss.NextRiseUtc && now < _sky.Iss.NextSetUtc;
+            if (passActive)
+            {
+                text = "ISS OVERHEAD  /  TLE  /  SETS IN " + ShortCountdown(
+                    _sky.Iss.NextSetUtc - now);
+            }
+            else
+            {
+                text = "NEXT ISS PASS  /  TLE EST.  /  " + ShortCountdown(
+                    _sky.Iss.NextRiseUtc - now) + "  /  PEAK " +
+                    Math.Round(_sky.Iss.PassPeakElevationDegrees).ToString("0") +
+                    "\u00B0";
+            }
+            FormattedText formatted = Format(text, 10, Ui.Sunrise, true);
+            Point point = new Point(center.X - formatted.Width / 2.0, 25.0);
+            dc.DrawText(formatted, point);
+            labels.Add(new Rect(point.X - 4, point.Y - 2,
+                formatted.Width + 8, formatted.Height + 4));
+        }
+
+        private void DrawAirportMarkers(DrawingContext dc, Point center,
+            double radiusX, double radiusY, List<Rect> labels,
+            double width, double height)
+        {
+            foreach (AirportReading airport in _sky.Airports)
+            {
+                Point inner = BearingPoint(center, radiusX, radiusY,
+                    airport.BearingDegrees, 0.91);
+                Point marker = BearingPoint(center, radiusX, radiusY,
+                    airport.BearingDegrees, 0.975);
+                Pen pen = new Pen(Ui.Airport, 1.2);
+                dc.DrawLine(pen, inner, marker);
+                dc.DrawEllipse(Ui.SkyBg, pen, marker, 4.0, 4.0);
+
+                double dx = center.X - marker.X;
+                double dy = center.Y - marker.Y;
+                double length = Math.Max(1.0, Math.Sqrt(dx * dx + dy * dy));
+                Point desired = new Point(marker.X + dx / length * 14.0 + 5.0,
+                    marker.Y + dy / length * 14.0 - 7.0);
+                string label = airport.Code + "  /  " +
+                    Math.Round(airport.DistanceKm).ToString("0") + " KM";
+                DrawPlacedLabel(dc, label, 9, Ui.Airport, desired, labels,
+                    width, height, true);
+            }
+        }
+
+        private static string ShortCountdown(TimeSpan remaining)
+        {
+            if (remaining.TotalSeconds < 0.0) remaining = TimeSpan.Zero;
+            if (remaining.TotalHours >= 1.0)
+                return ((int)remaining.TotalHours).ToString() + "H " +
+                    remaining.Minutes.ToString("00") + "M";
+            if (remaining.TotalMinutes >= 1.0)
+                return Math.Max(0, remaining.Minutes).ToString() + "M";
+            return Math.Max(0, remaining.Seconds).ToString() + "S";
+        }
+
         private void UpdateCelestial(DateTime now)
         {
             if ((now - _celestialUpdatedUtc).TotalSeconds < 5.0) return;
             _livePlanets = AmbientService.CalculatePlanets(now,
                 _sky.ObserverLatitude, _sky.ObserverLongitude);
+            _futurePlanets = AmbientService.CalculatePlanets(now.AddMinutes(10),
+                _sky.ObserverLatitude, _sky.ObserverLongitude);
             _liveStars = AmbientService.CalculateStars(now,
                 _sky.ObserverLatitude, _sky.ObserverLongitude);
             _celestialUpdatedUtc = now;
+        }
+
+        private void DrawPlanetArrow(DrawingContext dc, PlanetReading planet,
+            Point point, Point center, double radiusX, double radiusY, Brush color)
+        {
+            PlanetReading future = null;
+            foreach (PlanetReading candidate in _futurePlanets)
+            {
+                if (string.Equals(candidate.Name, planet.Name,
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    future = candidate;
+                    break;
+                }
+            }
+            if (future == null)
+            {
+                dc.DrawEllipse(color, null, point, 2.5, 2.5);
+                return;
+            }
+
+            Point futurePoint = SkyPoint(center, radiusX, radiusY,
+                future.BearingDegrees, future.AltitudeDegrees);
+            double dx = futurePoint.X - point.X;
+            double dy = futurePoint.Y - point.Y;
+            double length = Math.Sqrt(dx * dx + dy * dy);
+            if (length < 0.0001)
+            {
+                dc.DrawEllipse(color, null, point, 2.5, 2.5);
+                return;
+            }
+            dx /= length;
+            dy /= length;
+            Point tail = new Point(point.X - dx * 5.0, point.Y - dy * 5.0);
+            Point tip = new Point(point.X + dx * 7.0, point.Y + dy * 7.0);
+            dc.DrawLine(new Pen(color, 1.7), tail, tip);
+            StreamGeometry arrow = new StreamGeometry();
+            using (StreamGeometryContext geometry = arrow.Open())
+            {
+                geometry.BeginFigure(tip, true, true);
+                geometry.LineTo(new Point(tip.X - dx * 5.0 - dy * 3.0,
+                    tip.Y - dy * 5.0 + dx * 3.0), true, false);
+                geometry.LineTo(new Point(tip.X - dx * 5.0 + dy * 3.0,
+                    tip.Y - dy * 5.0 - dx * 3.0), true, false);
+            }
+            arrow.Freeze();
+            dc.DrawGeometry(color, null, arrow);
         }
 
         private void DrawIss(DrawingContext dc, DateTime now, Point center,
@@ -341,7 +522,7 @@ namespace ProjectorDash
         private void DrawOrientation(DrawingContext dc, double width, double height,
             List<Rect> labels)
         {
-            Pen corner = new Pen(Ui.MapCorner, 1.0);
+            Pen corner = new Pen(Ui.ReferenceDim, 1.2);
             double length = 18.0;
             dc.DrawLine(corner, new Point(16, 16), new Point(16 + length, 16));
             dc.DrawLine(corner, new Point(16, 16), new Point(16, 16 + length));
@@ -379,11 +560,11 @@ namespace ProjectorDash
                 Rect contour = new Rect(center.X - radiusX * scale,
                     center.Y - radiusY * scale,
                     radiusX * scale * 2.0, radiusY * scale * 2.0);
-                Pen pen = new Pen(Ui.MapGrid, 0.8);
+                Pen pen = new Pen(Ui.ReferenceDim, 1.0);
                 pen.DashStyle = new DashStyle(new double[] { 1, 9 }, 0);
                 dc.DrawRectangle(null, pen, contour);
                 string text = "EL " + elevation.ToString() + "\u00B0";
-                FormattedText formatted = Format(text, 8, Ui.MapGridText, false);
+                FormattedText formatted = Format(text, 9, Ui.Reference, false);
                 Point position = new Point(center.X + 7, contour.Top + 3);
                 dc.DrawText(formatted, position);
                 labels.Add(new Rect(position.X - 3, position.Y - 2,
@@ -399,29 +580,29 @@ namespace ProjectorDash
             double startX = center.X + 68.0;
             if (endX - startX < 135.0) return;
 
-            Pen pen = new Pen(Ui.AircraftCourse, 0.9);
+            Pen pen = new Pen(Ui.Reference, 1.3);
             pen.DashStyle = new DashStyle(new double[] { 2, 6 }, 0);
             dc.DrawLine(pen, new Point(startX, center.Y),
                 new Point(endX, center.Y));
 
-            FormattedText heading = Format("AIRCRAFT DISTANCE", 8,
-                Ui.MapGridText, true);
+            FormattedText heading = Format("AIRCRAFT DISTANCE", 11,
+                Ui.Reference, true);
             Point headingPoint = new Point(startX, center.Y - heading.Height - 3.0);
             dc.DrawText(heading, headingPoint);
             labels.Add(new Rect(headingPoint.X - 2, headingPoint.Y - 1,
                 heading.Width + 4, heading.Height + 2));
 
             double[] fractions = new double[] { 0.25, 0.50, 0.75, 1.0 };
-            Pen tickPen = new Pen(Ui.MapGridText, 0.8);
+            Pen tickPen = new Pen(Ui.Reference, 1.2);
             foreach (double fraction in fractions)
             {
                 double x = center.X + radiusX * AircraftRangeInset * fraction;
                 dc.DrawLine(tickPen,
-                    new Point(x, center.Y - 4), new Point(x, center.Y + 4));
+                    new Point(x, center.Y - 6), new Point(x, center.Y + 6));
                 string text = Math.Round(rangeKm * fraction).ToString("0") + " KM";
                 if (fraction >= 0.999) text += " LIMIT";
-                FormattedText formatted = Format(text, 8, Ui.MapGridText, false);
-                Point position = new Point(x - formatted.Width / 2.0, center.Y + 6.0);
+                FormattedText formatted = Format(text, 10, Ui.Reference, false);
+                Point position = new Point(x - formatted.Width / 2.0, center.Y + 8.0);
                 dc.DrawText(formatted, position);
                 labels.Add(new Rect(position.X - 2, position.Y - 1,
                     formatted.Width + 4, formatted.Height + 2));
@@ -434,7 +615,7 @@ namespace ProjectorDash
             int value = Normalize(bearing);
             string text = AmbientService.Cardinal(value) + "  " + value.ToString() +
                 "\u00B0  /  HORIZON";
-            FormattedText formatted = Format(text, 11, Ui.TextDim, true);
+            FormattedText formatted = Format(text, 11, Ui.Reference, true);
             double x = right ? point.X - formatted.Width : point.X;
             dc.DrawText(formatted, new Point(x, point.Y));
             labels.Add(new Rect(x - 3, point.Y - 2,
@@ -443,9 +624,9 @@ namespace ProjectorDash
 
         private void DrawZenith(DrawingContext dc, Point center)
         {
-            Brush dim = Ui.MapGridText;
-            Pen pen = new Pen(dim, 1.0);
-            dc.DrawEllipse(null, pen, center, 4, 4);
+            Brush dim = Ui.Reference;
+            Pen pen = new Pen(dim, 1.3);
+            dc.DrawEllipse(null, pen, center, 5, 5);
             dc.DrawLine(pen, new Point(center.X - 10, center.Y),
                 new Point(center.X - 5, center.Y));
             dc.DrawLine(pen, new Point(center.X + 5, center.Y),
@@ -454,20 +635,20 @@ namespace ProjectorDash
                 new Point(center.X, center.Y - 5));
             dc.DrawLine(pen, new Point(center.X, center.Y + 5),
                 new Point(center.X, center.Y + 10));
-            DrawText(dc, "ZENITH  /  90\u00B0", 9, dim,
-                new Point(center.X, center.Y + 14), true, true);
-            double pulse = 1.8 + (Math.Sin(DateTime.UtcNow.TimeOfDay.TotalSeconds * 3.0) + 1.0);
+            DrawText(dc, "ZENITH  /  90\u00B0", 11, dim,
+                new Point(center.X, center.Y + 17), true, true);
+            double pulse = 2.5 + (Math.Sin(DateTime.UtcNow.TimeOfDay.TotalSeconds * 3.0) + 1.0);
             dc.DrawEllipse(Ui.Accent, null,
-                new Point(center.X - 37, center.Y + 34), pulse, pulse);
-            DrawText(dc, "LIVE  " + DateTime.Now.ToString("HH:mm:ss"), 9,
-                Ui.MapZenith, new Point(center.X - 29, center.Y + 27), false, true);
+                new Point(center.X - 49, center.Y + 42), pulse, pulse);
+            DrawText(dc, "LIVE  " + DateTime.Now.ToString("HH:mm:ss"), 12,
+                Ui.Reference, new Point(center.X - 39, center.Y + 33), false, true);
         }
 
         private void DrawAircraftTrack(DrawingContext dc, AircraftTrack track,
             DateTime now, Point center, double radiusX, double radiusY,
             List<Rect> labels, double width, double height, bool showLabel)
         {
-            double elapsed = Math.Max(0.0, Math.Min(210.0,
+            double elapsed = Math.Max(0.0, Math.Min(75.0,
                 (now - track.AnchorUtc).TotalSeconds));
             double speedKmSecond = track.HasTrack
                 ? track.SpeedKnots * 1.852 / 3600.0 : 0.0;
@@ -587,14 +768,19 @@ namespace ProjectorDash
             AddVerticalHit(hits, right, top, bottom, current, rawX, rawY);
             AddHorizontalHit(hits, top, left, right, current, rawX, rawY);
             AddHorizontalHit(hits, bottom, left, right, current, rawX, rawY);
-            if (hits.Count < 2) return;
+            if (hits.Count == 0) return;
             hits.Sort();
-            double t1 = hits[0];
-            double t2 = hits[hits.Count - 1];
-            Point start = new Point(current.X + rawX * t1,
-                current.Y + rawY * t1);
-            Point end = new Point(current.X + rawX * t2,
-                current.Y + rawY * t2);
+            double endParameter = double.MaxValue;
+            foreach (double hit in hits)
+                if (hit > 0.0 && hit < endParameter) endParameter = hit;
+            if (endParameter == double.MaxValue) return;
+            double directionLength = Math.Sqrt(rawX * rawX + rawY * rawY);
+            double startParameter = 16.0 / Math.Max(0.001, directionLength);
+            if (endParameter <= startParameter) return;
+            Point start = new Point(current.X + rawX * startParameter,
+                current.Y + rawY * startParameter);
+            Point end = new Point(current.X + rawX * endParameter,
+                current.Y + rawY * endParameter);
             Pen coursePen = new Pen(Ui.AircraftCourse, 1.1);
             coursePen.DashStyle = new DashStyle(new double[] { 6, 8 }, 0);
             dc.DrawLine(coursePen, start, end);
@@ -728,7 +914,7 @@ namespace ProjectorDash
             {
                 AircraftTrack track = pair.Value;
                 if ((now - track.LastReceivedUtc).TotalSeconds > 90.0) continue;
-                double elapsed = Math.Max(0.0, Math.Min(210.0,
+                double elapsed = Math.Max(0.0, Math.Min(75.0,
                     (now - track.AnchorUtc).TotalSeconds));
                 double speed = track.HasTrack
                     ? track.SpeedKnots * 1.852 / 3600.0 : 0.0;
@@ -754,6 +940,14 @@ namespace ProjectorDash
             int value = (int)Math.Round(degrees) % 360;
             if (value < 0) value += 360;
             return value;
+        }
+
+        private static double SignedAngle(double degrees)
+        {
+            degrees %= 360.0;
+            if (degrees > 180.0) degrees -= 360.0;
+            if (degrees < -180.0) degrees += 360.0;
+            return degrees;
         }
 
         private FormattedText Format(string text, double size, Brush color, bool strong)

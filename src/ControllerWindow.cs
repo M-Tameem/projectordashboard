@@ -3,11 +3,13 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Interop;
+using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Shapes;
 using System.Windows.Threading;
@@ -25,13 +27,17 @@ namespace ProjectorDash
         private readonly AudioEndpoint _audio;
         private readonly BrightnessControl _brightness;
         private ProjectorWindow _projector;
+        private ProjectorDimmerWindow _projectorDimmer;
         private ReturnOverlayWindow _returnOverlay;
+        private RemoteControlWindow _remoteWindow;
         private MirrorWindow _fullscreenMirror;
         private readonly DwmWindowMirror _previewMirror = new DwmWindowMirror();
         private DispatcherTimer _clockTimer;
         private DispatcherTimer _alarmSoundTimer;
         private AudioEndpoint.AlarmAudioState _alarmAudioState;
         private IntPtr _lastLaunchedWindow = IntPtr.Zero;
+        private readonly Dictionary<ShortcutItem, IntPtr> _shortcutWindows =
+            new Dictionary<ShortcutItem, IntPtr>();
         private int _launchGeneration;
         private int _audioRefreshCounter;
         private DateTime _lastAlarmDate = DateTime.MinValue;
@@ -47,6 +53,12 @@ namespace ProjectorDash
         private DateTime _nextSkyRefreshUtc = DateTime.MinValue;
         private bool _weatherRefreshBusy;
         private bool _skyRefreshBusy;
+        private CancellationTokenSource _skyRefreshCancellation;
+        private int _skyRefreshGeneration;
+        private DispatcherTimer _keyboardOpenTimer;
+        private DateTime _lastKeyboardRequestUtc = DateTime.MinValue;
+        private string _externalTextFocusKey = "";
+        private int _externalTextFocusMisses;
 
         // Layout pieces that depend on config / DPI
         private RowDefinition _bottomRow;
@@ -62,6 +74,8 @@ namespace ProjectorDash
         private Button _audioDeviceBtn;
         private TouchSlider _briSlider;
         private TextBlock _briValueText;
+        private TouchSlider _projectorBriSlider;
+        private TextBlock _projectorBriValueText;
         private Button _sleepBtn;
         private Button _autoLockBtn;
         private Button _previewBtn;
@@ -76,7 +90,7 @@ namespace ProjectorDash
         private Popup _aircraftRangePopup;
         private TextBlock _aircraftRangePendingText;
         private int _pendingAircraftRadiusKm;
-        private TextBox _autoLockTime;
+        private TextBlock _autoLockTimePickerText;
         private bool _suppressSliderEvents;
         private bool _updateBusy;
         private TextBlock _weatherTempText;
@@ -84,6 +98,7 @@ namespace ProjectorDash
         private TextBlock _weatherMetaText;
         private TextBlock _sunriseText;
         private TextBlock _skyCountText;
+        private TextBlock _skyModeText;
         private TextBlock _aircraftSourceText;
         private TextBlock _aircraftText;
         private TextBlock _orbitText;
@@ -93,6 +108,10 @@ namespace ProjectorDash
         private TextBlock _overheadObjectsText;
         private TextBlock _overheadUpdatedText;
         private Button _ceilingMapBtn;
+        private Button _skyNetworkBtn;
+        private Button _ambientSkyNetworkBtn;
+        private Button _airportMarkersBtn;
+        private Button _ambientAirportMarkersBtn;
         private bool _projectorOverhead;
         private bool _overheadRestoresApp;
 
@@ -119,7 +138,7 @@ namespace ProjectorDash
         private Button _launchModeBtn;
         private Button _tabletModeBtn;
         private Button _alarmToggleBtn;
-        private TextBox _editAlarmTime;
+        private TextBlock _alarmTimePickerText;
         private ComboBox _audioDeviceCombo;
         private ComboBox _alarmDeviceCombo;
         private TextBlock _audioDeviceStatus;
@@ -163,6 +182,8 @@ namespace ProjectorDash
             ResizeMode = ResizeMode.NoResize;
 
             Content = BuildLayout();
+            AddHandler(Keyboard.GotKeyboardFocusEvent,
+                new KeyboardFocusChangedEventHandler(OnTextInputFocused), true);
 
             SourceInitialized += OnSourceInitialized;
             Loaded += OnLoadedOnce;
@@ -189,6 +210,7 @@ namespace ProjectorDash
             SyncAudioUi();
             SyncBrightnessUi();
             OpenProjectorWindow();
+            SyncProjectorBrightnessUi();
             UpdateAlarmUi();
             UpdateAutoLockUi();
             ApplyAmbientUi();
@@ -204,6 +226,8 @@ namespace ProjectorDash
         private void OnClosedExit(object sender, EventArgs e)
         {
             // Requirement: closing the controller exits the whole app.
+            CancelSkyRefresh();
+            _cfg.Save();
             if (_clockTimer != null) _clockTimer.Stop();
             if (_alarmSoundTimer != null) _alarmSoundTimer.Stop();
             if (_alarmAudioState != null)
@@ -217,9 +241,19 @@ namespace ProjectorDash
                 try { _projector.Close(); }
                 catch { }
             }
+            if (_projectorDimmer != null)
+            {
+                try { _projectorDimmer.Close(); }
+                catch { }
+            }
             if (_returnOverlay != null)
             {
                 try { _returnOverlay.Close(); }
+                catch { }
+            }
+            if (_remoteWindow != null)
+            {
+                try { _remoteWindow.Close(); }
                 catch { }
             }
             if (_fullscreenMirror != null)
@@ -243,6 +277,8 @@ namespace ProjectorDash
             if (proj == null) return;
             _projector = new ProjectorWindow(proj, _cfg.ProjectorMode);
             _projector.Show();
+            _projectorDimmer = new ProjectorDimmerWindow(proj);
+            _projectorDimmer.SetBrightness(_cfg.ProjectorBrightnessPercent);
             ApplyAmbientUi();
             Activate(); // keep touch focus on the controller
         }
@@ -261,6 +297,8 @@ namespace ProjectorDash
                 RefreshWeather();
             CheckAlarm(now);
             CheckAutoLock(now);
+            RefreshShortcutStates();
+            CheckAutomaticKeyboard();
             _audioRefreshCounter++;
             if (_audioRefreshCounter >= 5 &&
                 (_alarmOverlay == null || _alarmOverlay.Visibility != Visibility.Visible))
@@ -293,11 +331,23 @@ namespace ProjectorDash
             if (_powerPopup != null) _powerPopup.IsOpen = false;
             if (_aircraftRangePopup != null) _aircraftRangePopup.IsOpen = false;
             _previewMirror.Detach();
+            if (_projectorDimmer != null)
+            {
+                try { _projectorDimmer.Close(); }
+                catch { }
+                _projectorDimmer = null;
+            }
             if (_projector != null)
             {
                 try { _projector.Close(); }
                 catch { }
                 _projector = null;
+            }
+            if (_remoteWindow != null)
+            {
+                try { _remoteWindow.Close(); }
+                catch { }
+                _remoteWindow = null;
             }
 
             Background = Ui.BgGradient();
@@ -310,6 +360,7 @@ namespace ProjectorDash
             UpdateAutoLockUi();
             PopulateAmbientEditor();
             OpenProjectorWindow();
+            SyncProjectorBrightnessUi();
             if (_projector != null && _projectorOverhead)
             {
                 _projector.ShowOverhead(true);
@@ -398,23 +449,20 @@ namespace ProjectorDash
                 : "Hide projector apps without closing their tabs; tap again to wake.";
             actions.Children.Add(_sleepBtn);
 
-            _previewBtn = Ui.HeaderBtn("View",
-                delegate { OpenPreview(); });
-            _previewBtn.IsEnabled = !_cfg.TabletOnlyMode;
-            _previewBtn.Opacity = _cfg.TabletOnlyMode ? 0.45 : 1.0;
+            _previewBtn = _cfg.TabletOnlyMode
+                ? Ui.HeaderBtn("Screen off", delegate { SleepTabletDisplay(); })
+                : Ui.HeaderBtn("View", delegate { OpenPreview(); });
             _previewBtn.ToolTip = _cfg.TabletOnlyMode
-                ? "Preview is available when the projector is the active target."
+                ? "Turn off the tablet display while audio keeps playing. Tap the screen to wake it."
                 : "Show a live copy of the current projector window without opening another tab.";
             actions.Children.Add(_previewBtn);
 
-            _colorThemeBtn = Ui.HeaderBtn("Color " + Ui.ThemeName,
-                delegate { CycleColorTheme(); });
-            _colorThemeBtn.MinWidth = 100;
-            _colorThemeBtn.ToolTip = "Change the palette across the tablet, projector idle screen, and sky map.";
-            actions.Children.Add(_colorThemeBtn);
+            Button remote = Ui.HeaderBtn("Remote", delegate { OpenRemote(); });
+            remote.ToolTip = "Playback, volume, fullscreen, escape, enter, and keyboard controls for the current app.";
+            actions.Children.Add(remote);
 
             Button tools = Ui.HeaderBtn("Tools", delegate { OpenAutoLockPopup(); });
-            tools.ToolTip = "Keyboard, Windows desktop, and daily auto-lock.";
+            tools.ToolTip = "Keyboard, color, Windows desktop, and daily auto-lock.";
             actions.Children.Add(tools);
             _autoLockPopup = BuildAutoLockPopup(tools);
 
@@ -477,10 +525,11 @@ namespace ProjectorDash
             Grid.SetColumnSpan(_overheadOverlay, 2);
             root.Children.Add(_overheadOverlay);
 
-            // --- Bottom-left: volume + brightness --------------------------
+            // --- Bottom-left: volume + tablet/projector brightness --------
             Grid controls = new Grid();
             controls.Margin = new Thickness(28, 10, 20, 24);
             controls.VerticalAlignment = VerticalAlignment.Bottom;
+            controls.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             controls.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             controls.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 
@@ -488,6 +537,9 @@ namespace ProjectorDash
             UIElement bri = BuildBrightnessRow();
             Grid.SetRow(bri, 1);
             controls.Children.Add(bri);
+            UIElement projectorBri = BuildProjectorBrightnessRow();
+            Grid.SetRow(projectorBri, 2);
+            controls.Children.Add(projectorBri);
 
             Grid.SetRow(controls, 2);
             Grid.SetColumn(controls, 0);
@@ -552,9 +604,9 @@ namespace ProjectorDash
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
             StackPanel status = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
-            TextBlock mark = Ui.Label("OVERHEAD  /  LIVE", 11, Ui.Accent);
-            mark.FontWeight = FontWeights.SemiBold;
-            status.Children.Add(mark);
+            _skyModeText = Ui.Label("OVERHEAD  /  LIVE", 11, Ui.Accent);
+            _skyModeText.FontWeight = FontWeights.SemiBold;
+            status.Children.Add(_skyModeText);
             _skyCountText = Ui.Label("SET LOCATION", 15, Ui.Text);
             _skyCountText.FontWeight = FontWeights.SemiBold;
             status.Children.Add(_skyCountText);
@@ -599,6 +651,15 @@ namespace ProjectorDash
             _aircraftRangeBtn.Padding = new Thickness(12, 6, 12, 6);
             _aircraftRangeBtn.Margin = new Thickness(0, 0, 8, 0);
             actions.Children.Add(_aircraftRangeBtn);
+            _skyNetworkBtn = Ui.Btn("LIVE DATA ON", 12, Ui.AccentDim, Ui.Accent,
+                delegate { ToggleSkyNetwork(); });
+            _skyNetworkBtn.Height = 46;
+            _skyNetworkBtn.MinHeight = 46;
+            _skyNetworkBtn.Padding = new Thickness(12, 6, 12, 6);
+            _skyNetworkBtn.Margin = new Thickness(0, 0, 8, 0);
+            _skyNetworkBtn.ToolTip =
+                "Stops or resumes Sky Now aircraft and ISS requests. Weather is separate; planets and stars stay local.";
+            actions.Children.Add(_skyNetworkBtn);
             _mainOverheadBtn = Ui.Btn("PROJECT SKY", 13, Ui.Accent, Ui.Ink,
                 delegate { ToggleOverheadFromMain(); });
             _mainOverheadBtn.Height = 46;
@@ -610,6 +671,7 @@ namespace ProjectorDash
             grid.Children.Add(actions);
 
             _aircraftRangePopup = BuildAircraftRangePopup(_aircraftRangeBtn);
+            UpdateSkyNetworkButtons();
             card.Child = grid;
             return card;
         }
@@ -645,6 +707,11 @@ namespace ProjectorDash
             _overheadRangeBtn = SmallBtn("Range: " + _cfg.AircraftRadiusKm.ToString() + " km",
                 delegate { OpenAircraftRangePopup(_overheadRangeBtn); });
             actions.Children.Add(_overheadRangeBtn);
+            _airportMarkersBtn = SmallBtn("Airports: On",
+                delegate { ToggleAirportMarkers(); });
+            _airportMarkersBtn.ToolTip =
+                "Show or hide offline nearby-airport labels around the horizon.";
+            actions.Children.Add(_airportMarkersBtn);
             _ceilingMapBtn = SmallBtn("Show on projector", delegate { ToggleProjectorOverhead(); });
             _ceilingMapBtn.Background = Ui.AccentDim;
             _ceilingMapBtn.BorderBrush = Ui.Accent;
@@ -698,7 +765,7 @@ namespace ProjectorDash
             _overheadObjectsText.TextWrapping = TextWrapping.Wrap;
             infoStack.Children.Add(_overheadObjectsText);
             TextBlock key = Ui.Label(
-                "ACCENT  live aircraft + observed path\nAMBER  ISS + observed pass\nVIOLET  planets\nGREY  major stars\n\nAIRCRAFT  center is 0 km and the distance ruler ends at the selected search limit, so 60 km in a 120 km view appears halfway to that limit.\n\nSKY  center is zenith (90°); all edges are horizon (0°). EL 25° / 50° / 75° contours apply to the ISS, planets, and stars. Bearings wrap 360° around center. Dashed lines are reported aircraft courses; solid segments are observed movement.",
+                "ACCENT  live aircraft + accepted path\nAMBER  ISS + observed pass\nEDGE  nearby airports from the offline catalog\nVIOLET  planets + direction arrows\nGREY  major stars\nNEUTRAL  horizon, zenith + rulers\n\nAIRCRAFT  center is 0 km and the distance ruler ends at the selected search limit, so 60 km in a 120 km view appears halfway to that limit.\n\nSKY  center is zenith (90°); all edges are horizon (0°). EL 25° / 50° / 75° contours apply to the ISS, planets, and stars. Bearings wrap 360° around center. A dashed line extends only ahead along the accepted aircraft course; solid segments are accepted observed movement.",
                 12, Ui.TextDim);
             key.Margin = new Thickness(0, 18, 0, 0);
             key.TextWrapping = TextWrapping.Wrap;
@@ -840,15 +907,23 @@ namespace ProjectorDash
             card.CornerRadius = new CornerRadius(10);
             StackPanel panel = new StackPanel();
             panel.Children.Add(SectionTitle("Power"));
-            panel.Children.Add(WrappedNote(
-                "Signal off blanks every display. HDMI-CEC standby physically powers down a compatible projector when a CEC adapter is present."));
+            panel.Children.Add(WrappedNote(_cfg.TabletOnlyMode
+                ? "Screen sleep powers off the panel signal while Windows, playback, and audio keep running. Any touch normally wakes it."
+                : "Signal off blanks every display. HDMI-CEC standby physically powers down a compatible projector when a CEC adapter is present."));
 
             Button closeApp = Ui.Btn("Close current projector app", 15, Ui.Panel, Ui.Text,
                 delegate { popup.IsOpen = false; CloseProjectedApp(); });
             closeApp.Margin = new Thickness(0, 12, 0, 0);
             panel.Children.Add(closeApp);
-            Button signal = Ui.Btn("Turn display signals off", 15, Ui.Panel, Ui.Text,
-                delegate { popup.IsOpen = false; ScreenUtil.TurnOffAllDisplays(); });
+            Button signal = Ui.Btn(_cfg.TabletOnlyMode
+                ? "Sleep tablet screen · audio stays on"
+                : "Turn display signals off", 15, Ui.Panel, Ui.Text,
+                delegate
+                {
+                    popup.IsOpen = false;
+                    if (_cfg.TabletOnlyMode) SleepTabletDisplay();
+                    else ScreenUtil.TurnOffAllDisplays();
+                });
             signal.Margin = new Thickness(0, 8, 0, 0);
             panel.Children.Add(signal);
             Button cec = Ui.Btn("Projector standby · HDMI-CEC", 15, Ui.AccentDim, Ui.Accent,
@@ -900,7 +975,7 @@ namespace ProjectorDash
             StackPanel panel = new StackPanel();
             TextBlock title = SectionTitle("Tools");
             panel.Children.Add(title);
-            StackPanel quick = new StackPanel
+            WrapPanel quick = new WrapPanel
             {
                 Orientation = Orientation.Horizontal,
                 Margin = new Thickness(0, 10, 0, 12)
@@ -916,22 +991,39 @@ namespace ProjectorDash
                 if (_cfg.TabletOnlyMode) EnterTabletAppMode();
                 else WindowState = WindowState.Minimized;
             }));
+            _colorThemeBtn = SmallBtn("Color: " + Ui.ThemeName,
+                delegate
+                {
+                    popup.IsOpen = false;
+                    CycleColorTheme();
+                });
+            _colorThemeBtn.ToolTip = "Change the palette across the tablet, projector idle screen, and sky map.";
+            quick.Children.Add(_colorThemeBtn);
             panel.Children.Add(quick);
             panel.Children.Add(SectionTitle("Daily tablet auto-lock"));
             panel.Children.Add(WrappedNote(
                 "Locks Windows at this time every day—the same as pressing Win+L."));
 
-            StackPanel row = new StackPanel();
-            row.Orientation = Orientation.Horizontal;
-            row.Margin = new Thickness(0, 12, 0, 0);
-            _autoLockTime = Ui.Input("1:00 AM", 17);
-            _autoLockTime.Width = 130;
-            row.Children.Add(_autoLockTime);
-            Button save = Ui.Btn("Save", 16, Ui.Accent, Ui.Ink,
-                delegate { SaveAutoLockTime(); });
-            save.Margin = new Thickness(10, 0, 0, 0);
-            row.Children.Add(save);
-            panel.Children.Add(row);
+            _autoLockTimePickerText = Ui.Label("1:00 AM", 29, Ui.Text);
+            _autoLockTimePickerText.FontFamily = new FontFamily(Ui.FontLight);
+            _autoLockTimePickerText.Margin = new Thickness(0, 8, 0, 6);
+            panel.Children.Add(_autoLockTimePickerText);
+            WrapPanel lockTimeButtons = new WrapPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Margin = new Thickness(0, 0, 0, 8)
+            };
+            lockTimeButtons.Children.Add(TimeStepBtn("HOUR −",
+                delegate { ChangeAutoLockTime(-60); }));
+            lockTimeButtons.Children.Add(TimeStepBtn("HOUR +",
+                delegate { ChangeAutoLockTime(60); }));
+            lockTimeButtons.Children.Add(TimeStepBtn("5 MIN −",
+                delegate { ChangeAutoLockTime(-5); }));
+            lockTimeButtons.Children.Add(TimeStepBtn("5 MIN +",
+                delegate { ChangeAutoLockTime(5); }));
+            lockTimeButtons.Children.Add(TimeStepBtn("AM / PM",
+                delegate { ChangeAutoLockTime(12 * 60); }));
+            panel.Children.Add(lockTimeButtons);
 
             _autoLockToggleBtn = Ui.Btn("Auto-lock: Off", 16, Ui.Panel, Ui.Text,
                 delegate { ToggleAutoLock(); });
@@ -1053,6 +1145,7 @@ namespace ProjectorDash
         private UIElement BuildBrightnessRow()
         {
             Grid row = new Grid();
+            row.Margin = new Thickness(0, 0, 0, 10);
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(150) });
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -1080,6 +1173,50 @@ namespace ProjectorDash
             row.Children.Add(_briValueText);
 
             if (!_brightness.Available) row.Visibility = Visibility.Collapsed;
+            return row;
+        }
+
+        private UIElement BuildProjectorBrightnessRow()
+        {
+            Grid row = new Grid();
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(150) });
+            row.ColumnDefinitions.Add(new ColumnDefinition
+                { Width = new GridLength(1, GridUnitType.Star) });
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+            TextBlock label = Ui.Label("Projector brightness", 17, Ui.TextDim);
+            label.VerticalAlignment = VerticalAlignment.Center;
+            row.Children.Add(label);
+
+            _projectorBriSlider = new TouchSlider();
+            _projectorBriSlider.ValueChanged += delegate(int v)
+            {
+                if (_suppressSliderEvents) return;
+                _cfg.ProjectorBrightnessPercent = AppConfig.NormalizePercent(v);
+                if (_projectorDimmer != null)
+                    _projectorDimmer.SetBrightness(_cfg.ProjectorBrightnessPercent);
+                if (_projectorBriValueText != null)
+                    _projectorBriValueText.Text =
+                        _cfg.ProjectorBrightnessPercent.ToString() + "% · image dimmer";
+            };
+            _projectorBriSlider.MouseLeftButtonUp += delegate
+            {
+                _cfg.Save();
+            };
+            _projectorBriSlider.ToolTip =
+                "Dims every projected window without intercepting input. This does not change the projector lamp or LED power.";
+            Grid.SetColumn(_projectorBriSlider, 1);
+            row.Children.Add(_projectorBriSlider);
+
+            _projectorBriValueText = Ui.Label("", 16, Ui.TextDim);
+            _projectorBriValueText.Width = 214;
+            _projectorBriValueText.Margin = new Thickness(14, 0, 0, 0);
+            _projectorBriValueText.VerticalAlignment = VerticalAlignment.Center;
+            Grid.SetColumn(_projectorBriValueText, 2);
+            row.Children.Add(_projectorBriValueText);
+
+            if (_cfg.TabletOnlyMode || string.IsNullOrEmpty(_cfg.ProjectorDevice))
+                row.Visibility = Visibility.Collapsed;
             return row;
         }
 
@@ -1121,6 +1258,20 @@ namespace ProjectorDash
             if (_briValueText != null) _briValueText.Text = b.ToString() + "% · tablet only";
         }
 
+        private void SyncProjectorBrightnessUi()
+        {
+            if (_projectorBriSlider == null) return;
+            int brightness = AppConfig.NormalizePercent(
+                _cfg.ProjectorBrightnessPercent);
+            _suppressSliderEvents = true;
+            _projectorBriSlider.Value = brightness;
+            _suppressSliderEvents = false;
+            if (_projectorBriValueText != null)
+                _projectorBriValueText.Text = brightness.ToString() + "% · image dimmer";
+            if (_projectorDimmer != null)
+                _projectorDimmer.SetBrightness(brightness);
+        }
+
         // ------------------------------------------------------------------
         // Launcher
         // ------------------------------------------------------------------
@@ -1131,12 +1282,26 @@ namespace ProjectorDash
             foreach (ShortcutItem s in _cfg.Shortcuts)
             {
                 ShortcutItem item = s; // capture per iteration
-                string detail = item.HideTarget ? "private shortcut" :
+                bool active = ShortcutIsActive(item);
+                string baseDetail = item.HideTarget ? "private shortcut" :
                     (item.IsWeb() ? ShortHost(item.Target) : "app");
+                string detail = active ? "ON · " + baseDetail : baseDetail;
                 ImageSource icon = item.IsWeb() && !item.HideTarget
                     ? SiteIconCache.TryLoad(item.Target) : null;
-                _tilePanel.Children.Add(Ui.Tile(item.Name, detail, icon,
-                    delegate { Launch(item); }));
+                Button tile = Ui.Tile(item.Name, detail, icon,
+                    delegate { Launch(item); });
+                if (active)
+                {
+                    tile.Background = Ui.AccentDim;
+                    tile.BorderBrush = Ui.Accent;
+                    tile.BorderThickness = new Thickness(2);
+                    tile.ToolTip = "ON · tap to bring this existing window back to the front.";
+                }
+                else
+                {
+                    tile.ToolTip = "Tap to open this shortcut.";
+                }
+                _tilePanel.Children.Add(tile);
                 if (item.IsWeb() && !item.HideTarget && icon == null)
                 {
                     SiteIconCache.EnsureCached(item.Target, delegate
@@ -1150,6 +1315,113 @@ namespace ProjectorDash
             add.Background = Ui.SurfaceLow;
             add.BorderBrush = Ui.Line;
             _tilePanel.Children.Add(add);
+        }
+
+        private bool ShortcutIsActive(ShortcutItem item)
+        {
+            IntPtr hwnd;
+            if (!_shortcutWindows.TryGetValue(item, out hwnd))
+            {
+                hwnd = ScreenUtil.FindTaggedShortcutWindow(
+                    ShortcutWindowToken(item));
+                if (hwnd == IntPtr.Zero || !ScreenUtil.IsWindow(hwnd)) return false;
+                _shortcutWindows[item] = hwnd;
+            }
+            if (ScreenUtil.IsWindow(hwnd)) return true;
+            _shortcutWindows.Remove(item);
+            return false;
+        }
+
+        private static int ShortcutWindowToken(ShortcutItem item)
+        {
+            string id = item == null ? "" : (item.Id ?? "");
+            if (id.Length == 0 && item != null)
+                id = (item.Name ?? "") + "\n" + (item.Target ?? "");
+            unchecked
+            {
+                uint hash = 2166136261;
+                for (int i = 0; i < id.Length; i++)
+                {
+                    hash ^= id[i];
+                    hash *= 16777619;
+                }
+                int token = (int)(hash & 0x7FFFFFFF);
+                return token == 0 ? 1 : token;
+            }
+        }
+
+        private void RegisterShortcutWindow(ShortcutItem item, IntPtr hwnd)
+        {
+            if (item == null || hwnd == IntPtr.Zero || !ScreenUtil.IsWindow(hwnd)) return;
+            IntPtr existing;
+            if (_shortcutWindows.TryGetValue(item, out existing) && existing == hwnd) return;
+            if (existing != IntPtr.Zero && existing != hwnd)
+                ScreenUtil.UntagShortcutWindow(existing);
+            _shortcutWindows[item] = hwnd;
+            ScreenUtil.TagShortcutWindow(hwnd, ShortcutWindowToken(item));
+            RebuildTiles();
+        }
+
+        private void RefreshShortcutStates()
+        {
+            if (_shortcutWindows.Count == 0) return;
+            List<ShortcutItem> closed = new List<ShortcutItem>();
+            foreach (KeyValuePair<ShortcutItem, IntPtr> pair in _shortcutWindows)
+            {
+                if (!ScreenUtil.IsWindow(pair.Value)) closed.Add(pair.Key);
+            }
+            if (closed.Count == 0) return;
+            foreach (ShortcutItem item in closed) _shortcutWindows.Remove(item);
+            RebuildTiles();
+        }
+
+        private bool ActivateOpenShortcut(ShortcutItem item,
+            WinForms.Screen target)
+        {
+            IntPtr hwnd;
+            if (!ShortcutIsActive(item) ||
+                !_shortcutWindows.TryGetValue(item, out hwnd)) return false;
+            if (!ScreenUtil.IsWindow(hwnd))
+            {
+                _shortcutWindows.Remove(item);
+                RebuildTiles();
+                return false;
+            }
+            _lastLaunchedWindow = hwnd;
+            ScreenUtil.BringAppWindowToFront(hwnd, target, _cfg.LaunchFullscreen);
+            if (_cfg.TabletOnlyMode) EnterTabletAppMode();
+            return true;
+        }
+
+        private void ForgetShortcutWindow(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero) return;
+            List<ShortcutItem> matches = new List<ShortcutItem>();
+            foreach (KeyValuePair<ShortcutItem, IntPtr> pair in _shortcutWindows)
+                if (pair.Value == hwnd) matches.Add(pair.Key);
+            if (matches.Count == 0) return;
+            ScreenUtil.UntagShortcutWindow(hwnd);
+            foreach (ShortcutItem item in matches) _shortcutWindows.Remove(item);
+            RebuildTiles();
+        }
+
+        private void ForgetShortcutAssociation(ShortcutItem item)
+        {
+            if (item == null) return;
+            IntPtr hwnd;
+            if (_shortcutWindows.TryGetValue(item, out hwnd))
+                ScreenUtil.UntagShortcutWindow(hwnd);
+            _shortcutWindows.Remove(item);
+        }
+
+        private void ForgetBrowserShortcutWindows()
+        {
+            List<ShortcutItem> web = new List<ShortcutItem>();
+            foreach (KeyValuePair<ShortcutItem, IntPtr> pair in _shortcutWindows)
+                if (pair.Key.IsWeb()) web.Add(pair.Key);
+            if (web.Count == 0) return;
+            foreach (ShortcutItem item in web) _shortcutWindows.Remove(item);
+            RebuildTiles();
         }
 
         private static string ShortHost(string url)
@@ -1171,6 +1443,7 @@ namespace ProjectorDash
                 if (_projectorSleeping) WakeProjector();
                 WinForms.Screen projector = GetProjectorScreen(true);
                 if (projector == null) return;
+                if (ActivateOpenShortcut(item, projector)) return;
 
                 ProcessStartInfo psi = new ProcessStartInfo();
                 string expectedExe = item.Target;
@@ -1209,7 +1482,7 @@ namespace ProjectorDash
                     catch { }
                     started.Dispose();
                 }
-                BeginProjectorPlacement(before, processId, expectedExe, projector);
+                BeginProjectorPlacement(before, processId, expectedExe, projector, item);
                 if (_cfg.TabletOnlyMode) EnterTabletAppMode();
             }
             catch (Exception ex)
@@ -1240,6 +1513,7 @@ namespace ProjectorDash
                 WinForms.Screen projector = GetProjectorScreen(true);
                 if (projector == null) return;
 
+                ForgetBrowserShortcutWindows();
                 StopBrowserProcesses(path);
 
                 ProcessStartInfo psi = new ProcessStartInfo();
@@ -1258,7 +1532,7 @@ namespace ProjectorDash
                     try { processId = started.Id; } catch { }
                     started.Dispose();
                 }
-                BeginProjectorPlacement(before, processId, path, projector);
+                BeginProjectorPlacement(before, processId, path, projector, null);
                 if (_cfg.TabletOnlyMode) EnterTabletAppMode();
             }
             catch (Exception ex)
@@ -1374,6 +1648,7 @@ namespace ProjectorDash
         {
             if (_overheadMap == null) return;
             UpdateAircraftRangeUi();
+            UpdateSkyNetworkButtons();
             _overheadMap.SetData(_sky, _cfg.FacingDegrees);
             if (_projector != null && _projectorOverhead)
                 _projector.UpdateOverhead(_sky, _cfg.FacingDegrees);
@@ -1410,15 +1685,31 @@ namespace ProjectorDash
                 return;
             }
 
-            _overheadFeedText.Text = _sky.AircraftFeedAvailable
-                ? (OverheadAircraftCount().ToString() + " overhead · " +
-                    _sky.Planes.Count.ToString() + " within " +
-                    _cfg.AircraftRadiusKm.ToString() + " km · " +
-                    (_sky.AircraftFeedName.Length == 0 ? "live ADS-B" : _sky.AircraftFeedName))
-                : ("Aircraft feeds offline\n" + _sky.AircraftError);
-            _overheadFeedText.Foreground = _sky.AircraftFeedAvailable ? Ui.Text : Ui.Danger;
-            _overheadUpdatedText.Text = "Updated " + _sky.UpdatedUtc.ToLocalTime().ToString("h:mm:ss tt") +
-                " · markers move continuously · data sync " + SkyRefreshSeconds().ToString() + " sec";
+            bool externalFeedsEnabled = _cfg.SkyNetworkEnabled &&
+                _sky.ExternalFeedsEnabled;
+            if (!externalFeedsEnabled)
+            {
+                _overheadFeedText.Text =
+                    "Aircraft and ISS network requests are off · local sky only";
+                _overheadFeedText.Foreground = Ui.TextDim;
+                _overheadUpdatedText.Text =
+                    "No Sky Now API polling · planets and stars follow the local clock";
+            }
+            else
+            {
+                _overheadFeedText.Text = _sky.AircraftFeedAvailable
+                    ? (OverheadAircraftCount().ToString() + " overhead · " +
+                        _sky.Planes.Count.ToString() + " within " +
+                        _cfg.AircraftRadiusKm.ToString() + " km · " +
+                        (_sky.AircraftFeedName.Length == 0 ? "live ADS-B" : _sky.AircraftFeedName))
+                    : ("Aircraft feeds offline\n" + _sky.AircraftError);
+                _overheadFeedText.Foreground = _sky.AircraftFeedAvailable
+                    ? Ui.Text : Ui.Danger;
+                _overheadUpdatedText.Text = "Updated " +
+                    _sky.UpdatedUtc.ToLocalTime().ToString("h:mm:ss tt") +
+                    " · markers move continuously · data sync " +
+                    SkyRefreshSeconds().ToString() + " sec";
+            }
 
             List<string> objects = new List<string>();
             int planeDetails = 0;
@@ -1448,12 +1739,24 @@ namespace ProjectorDash
             if (overheadCount > planeDetails)
                 objects.Add("+ " + (overheadCount - planeDetails).ToString() +
                     " more aircraft plotted on the live view");
-            if (_sky.Iss.Available)
+            if (externalFeedsEnabled && _sky.Iss.Available)
                 objects.Add(_sky.Iss.AboveHorizon
                     ? "ISS / NORAD 25544 · " + Math.Round(_sky.Iss.ElevationDegrees).ToString("0") +
                         "° above horizon · " + AmbientService.Direction(_sky.Iss.BearingDegrees,
                         _cfg.FacingDegrees)
                     : "ISS · below horizon");
+            if (_sky.Iss.PassPredictionAvailable)
+                objects.Add(IssPassSummary(_sky.Iss, DateTime.UtcNow));
+            else if (externalFeedsEnabled && _sky.Iss.Available)
+                objects.Add("No ISS horizon pass found in the next 36 hours.");
+            if (_cfg.AirportMarkersEnabled)
+            {
+                foreach (AirportReading airport in _sky.Airports)
+                    objects.Add("AIRPORT " + airport.Code + " · " +
+                        Math.Round(airport.DistanceKm).ToString("0") + " km · " +
+                        AmbientService.Direction(airport.BearingDegrees,
+                            _cfg.FacingDegrees));
+            }
             foreach (PlanetReading planet in _sky.Planets)
                 objects.Add(planet.Name + " · " +
                     Math.Round(planet.AltitudeDegrees).ToString("0") + "° above horizon · " +
@@ -1619,8 +1922,88 @@ namespace ProjectorDash
         {
             if (_returnOverlay != null) return;
             _returnOverlay = new ReturnOverlayWindow(tablet,
+                _cfg.TabletOnlyMode,
                 delegate { ReturnToDashboard(); },
+                delegate { OpenRemote(); },
+                delegate { SleepTabletDisplay(); },
                 delegate { EmergencyOff(); });
+        }
+
+        private void OpenRemote()
+        {
+            WinForms.Screen tablet = ScreenUtil.FindByDevice(
+                _cfg.TabletDevice, WinForms.Screen.PrimaryScreen);
+            if (_remoteWindow == null)
+            {
+                _remoteWindow = new RemoteControlWindow(tablet,
+                    delegate(int key) { SendRemoteKey(key); },
+                    delegate(int delta) { AdjustRemoteVolume(delta); },
+                    delegate { ToggleRemoteMute(); },
+                    delegate { ShowTouchKeyboard(); });
+            }
+            if (!_remoteWindow.IsVisible) _remoteWindow.Show();
+            _remoteWindow.Topmost = true;
+            _remoteWindow.Activate();
+        }
+
+        private IntPtr CurrentRemoteTarget()
+        {
+            WinForms.Screen target = GetProjectorScreen(false);
+            if (target == null) return IntPtr.Zero;
+            if (ScreenUtil.IsWindow(_lastLaunchedWindow) &&
+                ScreenUtil.WindowIsOnScreen(_lastLaunchedWindow, target))
+                return _lastLaunchedWindow;
+            return ScreenUtil.FindTopAppWindowOnScreen(target,
+                GetCurrentProcessId());
+        }
+
+        private void SendRemoteKey(int virtualKey)
+        {
+            if (_projectorSleeping) WakeProjector();
+            IntPtr hwnd = CurrentRemoteTarget();
+            if (hwnd == IntPtr.Zero) return;
+            WinForms.Screen target = GetProjectorScreen(false);
+            ScreenUtil.BringAppWindowToFront(hwnd, target, _cfg.LaunchFullscreen);
+            ScreenUtil.SendVirtualKey(hwnd, virtualKey);
+            _lastLaunchedWindow = hwnd;
+        }
+
+        private void AdjustRemoteVolume(int delta)
+        {
+            int volume = _audio.GetVolume() + delta;
+            if (volume < 0) volume = 0;
+            if (volume > 100) volume = 100;
+            _audio.SetVolume(volume);
+            if (volume > 0 && _audio.GetMute()) _audio.SetMute(false);
+            SyncAudioUi();
+            UpdateMuteButton();
+        }
+
+        private void ToggleRemoteMute()
+        {
+            _audio.SetMute(!_audio.GetMute());
+            UpdateMuteButton();
+        }
+
+        private void SleepTabletDisplay()
+        {
+            if (!_cfg.TabletOnlyMode) return;
+            if (_powerPopup != null) _powerPopup.IsOpen = false;
+            if (_autoLockPopup != null) _autoLockPopup.IsOpen = false;
+            if (_aircraftRangePopup != null) _aircraftRangePopup.IsOpen = false;
+
+            // Wait until the activating finger/mouse button is fully released;
+            // otherwise that same input can immediately wake the panel again.
+            // This powers off only the display signal. Windows, Supermium,
+            // audio routing, playback, timers, and network activity continue.
+            DispatcherTimer screenOff = new DispatcherTimer();
+            screenOff.Interval = TimeSpan.FromMilliseconds(450);
+            screenOff.Tick += delegate
+            {
+                screenOff.Stop();
+                ScreenUtil.TurnOffAllDisplays();
+            };
+            screenOff.Start();
         }
 
         private void EnterTabletAppMode()
@@ -1668,6 +2051,7 @@ namespace ProjectorDash
             string browser = _cfg.BrowserPath;
             if (string.IsNullOrEmpty(browser)) browser = AppConfig.DetectSupermium();
             StopBrowserProcesses(browser);
+            ForgetBrowserShortcutWindows();
             ClosePreview();
             _mirrorFullscreen = false;
             if (_fullscreenMirror != null)
@@ -1677,6 +2061,7 @@ namespace ProjectorDash
                 _fullscreenMirror = null;
             }
             if (_returnOverlay != null) _returnOverlay.Hide();
+            if (_remoteWindow != null) _remoteWindow.Hide();
             _tabletAppMode = false;
 
             // Lock before powering down so waking a screen never exposes the
@@ -1693,8 +2078,48 @@ namespace ProjectorDash
             powerOff.Start();
         }
 
+        private void OnTextInputFocused(object sender,
+            KeyboardFocusChangedEventArgs e)
+        {
+            if (e.NewFocus is TextBox) QueueTouchKeyboard();
+        }
+
+        private void CheckAutomaticKeyboard()
+        {
+            WinForms.Screen target = GetProjectorScreen(false);
+            string key = ScreenUtil.ForegroundTextInputKey(target,
+                GetCurrentProcessId());
+            if (string.IsNullOrEmpty(key))
+            {
+                _externalTextFocusMisses++;
+                if (_externalTextFocusMisses >= 2) _externalTextFocusKey = "";
+                return;
+            }
+            _externalTextFocusMisses = 0;
+            if (key == _externalTextFocusKey) return;
+            _externalTextFocusKey = key;
+            QueueTouchKeyboard();
+        }
+
+        private void QueueTouchKeyboard()
+        {
+            if ((DateTime.UtcNow - _lastKeyboardRequestUtc).TotalSeconds < 1.5)
+                return;
+            if (_keyboardOpenTimer != null) _keyboardOpenTimer.Stop();
+            _keyboardOpenTimer = new DispatcherTimer();
+            _keyboardOpenTimer.Interval = TimeSpan.FromMilliseconds(180);
+            _keyboardOpenTimer.Tick += delegate
+            {
+                _keyboardOpenTimer.Stop();
+                _lastKeyboardRequestUtc = DateTime.UtcNow;
+                ShowTouchKeyboard();
+            };
+            _keyboardOpenTimer.Start();
+        }
+
         private void ShowTouchKeyboard()
         {
+            _lastKeyboardRequestUtc = DateTime.UtcNow;
             try
             {
                 // The docked TabTip spans the bottom of the tablet and fights
@@ -1774,7 +2199,7 @@ namespace ProjectorDash
         }
 
         private void BeginProjectorPlacement(HashSet<IntPtr> before, int processId,
-            string expectedExe, WinForms.Screen projector)
+            string expectedExe, WinForms.Screen projector, ShortcutItem shortcut)
         {
             int generation = ++_launchGeneration;
             int ticks = 0;
@@ -1805,6 +2230,7 @@ namespace ProjectorDash
                         stableTicks++;
                     }
                     _lastLaunchedWindow = tracked;
+                    if (shortcut != null) RegisterShortcutWindow(shortcut, tracked);
                     ScreenUtil.PlaceExternalWindow(tracked, projector, _cfg.LaunchFullscreen);
                     if (!_cfg.TabletOnlyMode) Activate();
 
@@ -1920,6 +2346,11 @@ namespace ProjectorDash
                     ? "There isn't another app open on the tablet."
                     : "There isn't an app open on the projector.",
                     "Projector Dashboard");
+            }
+            else
+            {
+                ForgetShortcutWindow(hwnd);
+                if (_lastLaunchedWindow == hwnd) _lastLaunchedWindow = IntPtr.Zero;
             }
             if (_cfg.TabletOnlyMode) ReturnToDashboard();
             else Activate();
@@ -2174,11 +2605,20 @@ namespace ProjectorDash
             left.Children.Add(modeRow);
             left.Children.Add(WrappedNote(
                 _cfg.TabletOnlyMode
-                ? "Tablet-only launches fullscreen here and keeps a small Dashboard / emergency-off control above the app. Sleep hides the app without closing its tabs."
+                ? "Tablet-only launches fullscreen here and keeps Dashboard, Screen off, and emergency-off controls above the app. Screen off leaves playback and audio running; Hide only puts the app away without closing its tabs."
                 : "Idle hides open apps and tabs without closing them, then shows the ambient screen until you wake it."));
-            Button sleep = SmallBtn("Idle / wake now", delegate { ToggleProjectorSleep(); });
+            Button sleep = SmallBtn(_cfg.TabletOnlyMode
+                ? "Hide / restore app"
+                : "Idle / wake now", delegate { ToggleProjectorSleep(); });
             sleep.Margin = new Thickness(0, 10, 0, 0);
             left.Children.Add(sleep);
+            if (_cfg.TabletOnlyMode)
+            {
+                Button screenOff = SmallBtn("Screen off · keep audio",
+                    delegate { SleepTabletDisplay(); });
+                screenOff.Margin = new Thickness(0, 8, 0, 0);
+                left.Children.Add(screenOff);
+            }
             page.Children.Add(left);
 
             StackPanel right = new StackPanel();
@@ -2200,8 +2640,10 @@ namespace ProjectorDash
             sizeRow.Children.Add(apply);
             right.Children.Add(sizeRow);
             right.Children.Add(WrappedNote(_brightness.Available
-                ? "Tablet brightness controls only the built-in tablet backlight; projector brightness must be changed on the projector."
-                : "Windows does not expose tablet backlight control on this device, so the dashboard hides that slider."));
+                ? "Tablet brightness controls the built-in backlight. Projector brightness uses a saved click-through image dimmer that remains above projected apps without blocking input."
+                : "Windows does not expose tablet backlight control on this device, so that slider is hidden. The projector image dimmer remains available in two-screen mode."));
+            right.Children.Add(WrappedNote(
+                "The projector dimmer lowers visible output in software; it does not reduce the projector lamp/LED power or replace the projector's own eco mode."));
             Button displays = SmallBtn("Reassign displays", delegate { ReassignDisplays(); });
             displays.Margin = new Thickness(0, 10, 0, 0);
             right.Children.Add(displays);
@@ -2256,19 +2698,33 @@ namespace ProjectorDash
             Grid page = TwoColumnSettingsPage();
             StackPanel left = new StackPanel();
             left.Children.Add(SectionTitle("Daily alarm"));
-            StackPanel timeRow = new StackPanel { Orientation = Orientation.Horizontal,
-                Margin = new Thickness(0, 8, 0, 8) };
-            _editAlarmTime = Ui.Input("8:00 AM", 17);
-            _editAlarmTime.Width = 135;
-            timeRow.Children.Add(_editAlarmTime);
-            Button save = SmallBtn("Save time", delegate { SaveAlarmTime(); });
-            save.Margin = new Thickness(10, 0, 0, 0);
-            timeRow.Children.Add(save);
+            _alarmTimePickerText = Ui.Label("8:00 AM", 40, Ui.Text);
+            _alarmTimePickerText.FontFamily = new FontFamily(Ui.FontLight);
+            _alarmTimePickerText.Margin = new Thickness(0, 6, 0, 8);
+            left.Children.Add(_alarmTimePickerText);
+
+            WrapPanel timeButtons = new WrapPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Margin = new Thickness(0, 0, 0, 8)
+            };
+            timeButtons.Children.Add(TimeStepBtn("HOUR  −",
+                delegate { ChangeAlarmTime(-60); }));
+            timeButtons.Children.Add(TimeStepBtn("HOUR  +",
+                delegate { ChangeAlarmTime(60); }));
+            timeButtons.Children.Add(TimeStepBtn("5 MIN  −",
+                delegate { ChangeAlarmTime(-5); }));
+            timeButtons.Children.Add(TimeStepBtn("5 MIN  +",
+                delegate { ChangeAlarmTime(5); }));
+            timeButtons.Children.Add(TimeStepBtn("AM / PM",
+                delegate { ChangeAlarmTime(12 * 60); }));
+            left.Children.Add(timeButtons);
+
             _alarmToggleBtn = SmallBtn("Alarm: Off", delegate { ToggleAlarm(); });
-            timeRow.Children.Add(_alarmToggleBtn);
-            left.Children.Add(timeRow);
+            _alarmToggleBtn.MinWidth = 150;
+            left.Children.Add(_alarmToggleBtn);
             left.Children.Add(WrappedNote(
-                "The alarm repeats daily while the dashboard is awake and includes Dismiss and 10-minute Snooze."));
+                "Tap the large controls to set the time—no typing required. Changes save immediately. The alarm repeats daily while the dashboard is awake and includes Dismiss and 10-minute Snooze."));
             page.Children.Add(left);
 
             StackPanel right = new StackPanel();
@@ -2353,11 +2809,21 @@ namespace ProjectorDash
             };
             _temperatureUnitBtn = SmallBtn("Units: °C", delegate { ToggleTemperatureUnit(); });
             choices.Children.Add(_temperatureUnitBtn);
+            _ambientSkyNetworkBtn = SmallBtn("Sky feeds: On",
+                delegate { ToggleSkyNetwork(); });
+            _ambientSkyNetworkBtn.ToolTip =
+                "Stops or resumes aircraft and ISS network requests. Local planet/star calculations remain on.";
+            choices.Children.Add(_ambientSkyNetworkBtn);
+            _ambientAirportMarkersBtn = SmallBtn("Airports: On",
+                delegate { ToggleAirportMarkers(); });
+            _ambientAirportMarkersBtn.ToolTip =
+                "Uses the bundled airport catalog; no web request is made.";
+            choices.Children.Add(_ambientAirportMarkersBtn);
             Button refresh = SmallBtn("Refresh now", delegate { StartAmbientRefresh(true); });
             choices.Children.Add(refresh);
             right.Children.Add(choices);
             right.Children.Add(WrappedNote(
-                "Planet positions are calculated locally from JPL orbital elements. Bearings are true-north compass directions; cloud and daylight can still hide an object."));
+                "Sky feeds controls only ADS-B aircraft and ISS requests. Weather remains on its normal 15-minute schedule; airports, planets, and stars are calculated from bundled/local data. ISS position and pass times use a Where the ISS at? TLE refreshed no more than once every six hours, then propagated locally; with feeds off, that estimate remains available for up to 24 hours. Bearings are true-north compass directions; cloud and daylight can still hide an object."));
             Grid.SetColumn(right, 2);
             page.Children.Add(right);
             return page;
@@ -2450,6 +2916,7 @@ namespace ProjectorDash
                 _editFacingDegrees.Text = _cfg.FacingDegrees.ToString(CultureInfo.InvariantCulture);
             if (_temperatureUnitBtn != null)
                 _temperatureUnitBtn.Content = _cfg.UseFahrenheit ? "Units: °F" : "Units: °C";
+            UpdateSkyNetworkButtons();
             if (_locationStatus != null)
             {
                 _locationStatus.Text = _cfg.LocationConfigured
@@ -2553,6 +3020,112 @@ namespace ProjectorDash
             StartAmbientRefresh(true);
         }
 
+        private void ToggleSkyNetwork()
+        {
+            _cfg.SkyNetworkEnabled = !_cfg.SkyNetworkEnabled;
+            _cfg.Save();
+            CancelSkyRefresh();
+            _nextSkyRefreshUtc = _cfg.SkyNetworkEnabled
+                ? DateTime.MinValue : DateTime.MaxValue;
+            if (_cfg.LocationConfigured)
+            {
+                if (_cfg.SkyNetworkEnabled)
+                {
+                    _sky = null;
+                    ApplyAmbientUi();
+                    RefreshSky();
+                }
+                else
+                {
+                    _sky = AmbientService.GetLocalSky(_cfg.Latitude, _cfg.Longitude,
+                        _cfg.AircraftRadiusKm, _cfg.AirportMarkersEnabled);
+                    ApplyAmbientUi();
+                }
+            }
+            UpdateSkyNetworkButtons();
+        }
+
+        private void ToggleAirportMarkers()
+        {
+            _cfg.AirportMarkersEnabled = !_cfg.AirportMarkersEnabled;
+            _cfg.Save();
+            ApplyAirportMarkerPreference(_sky);
+            UpdateSkyNetworkButtons();
+            ApplyAmbientUi();
+        }
+
+        private void ApplyAirportMarkerPreference(SkyReading sky)
+        {
+            if (sky == null) return;
+            sky.AirportMarkersEnabled = _cfg.AirportMarkersEnabled;
+            sky.Airports.Clear();
+            if (_cfg.AirportMarkersEnabled && _cfg.LocationConfigured)
+                sky.Airports.AddRange(AirportCatalog.FindNearby(
+                    _cfg.Latitude, _cfg.Longitude));
+        }
+
+        private void UpdateSkyNetworkButtons()
+        {
+            bool enabled = _cfg.SkyNetworkEnabled;
+            if (_skyModeText != null)
+                _skyModeText.Text = enabled ? "OVERHEAD  /  LIVE" : "OVERHEAD  /  LOCAL ONLY";
+            if (_skyNetworkBtn != null)
+            {
+                _skyNetworkBtn.Content = enabled ? "LIVE DATA ON" : "LIVE DATA OFF";
+                _skyNetworkBtn.Background = enabled ? Ui.AccentDim : Ui.PanelHi;
+                _skyNetworkBtn.Foreground = enabled ? Ui.Accent : Ui.TextDim;
+                _skyNetworkBtn.BorderBrush = enabled ? Ui.Accent : Ui.Line;
+            }
+            if (_ambientSkyNetworkBtn != null)
+            {
+                _ambientSkyNetworkBtn.Content = enabled
+                    ? "Sky feeds: On" : "Sky feeds: Off";
+                _ambientSkyNetworkBtn.Background = enabled ? Ui.AccentDim : Ui.Panel;
+                _ambientSkyNetworkBtn.Foreground = enabled ? Ui.Accent : Ui.TextDim;
+            }
+            if (_airportMarkersBtn != null)
+            {
+                _airportMarkersBtn.Content = _cfg.AirportMarkersEnabled
+                    ? "Airports: On" : "Airports: Off";
+                _airportMarkersBtn.Background = _cfg.AirportMarkersEnabled
+                    ? Ui.AccentDim : Ui.Panel;
+                _airportMarkersBtn.Foreground = _cfg.AirportMarkersEnabled
+                    ? Ui.Accent : Ui.TextDim;
+            }
+            if (_ambientAirportMarkersBtn != null)
+            {
+                _ambientAirportMarkersBtn.Content = _cfg.AirportMarkersEnabled
+                    ? "Airports: On" : "Airports: Off";
+                _ambientAirportMarkersBtn.Background = _cfg.AirportMarkersEnabled
+                    ? Ui.AccentDim : Ui.Panel;
+                _ambientAirportMarkersBtn.Foreground = _cfg.AirportMarkersEnabled
+                    ? Ui.Accent : Ui.TextDim;
+            }
+            if (_aircraftRangeBtn != null)
+            {
+                _aircraftRangeBtn.IsEnabled = enabled;
+                _aircraftRangeBtn.Opacity = enabled ? 1.0 : 0.45;
+            }
+            if (_overheadRangeBtn != null)
+            {
+                _overheadRangeBtn.IsEnabled = enabled;
+                _overheadRangeBtn.Opacity = enabled ? 1.0 : 0.45;
+            }
+        }
+
+        private void CancelSkyRefresh()
+        {
+            _skyRefreshGeneration++;
+            if (_skyRefreshCancellation != null)
+            {
+                try { _skyRefreshCancellation.Cancel(); }
+                catch { }
+                _skyRefreshCancellation.Dispose();
+                _skyRefreshCancellation = null;
+            }
+            _skyRefreshBusy = false;
+        }
+
         private void StartAmbientRefresh(bool immediate)
         {
             if (!_cfg.LocationConfigured)
@@ -2605,17 +3178,38 @@ namespace ProjectorDash
         private void RefreshSky()
         {
             if (!_cfg.LocationConfigured || _skyRefreshBusy) return;
+            if (!_cfg.SkyNetworkEnabled)
+            {
+                _nextSkyRefreshUtc = DateTime.MaxValue;
+                _sky = AmbientService.GetLocalSky(_cfg.Latitude, _cfg.Longitude,
+                    _cfg.AircraftRadiusKm, _cfg.AirportMarkersEnabled);
+                ApplyAmbientUi();
+                return;
+            }
             _skyRefreshBusy = true;
             _nextSkyRefreshUtc = DateTime.UtcNow.AddSeconds(SkyRefreshSeconds());
             int requestedRadiusKm = _cfg.AircraftRadiusKm;
+            CancellationTokenSource cancellation = new CancellationTokenSource();
+            _skyRefreshCancellation = cancellation;
+            int generation = ++_skyRefreshGeneration;
             AmbientService.GetSkyAsync(_cfg.Latitude, _cfg.Longitude,
-                requestedRadiusKm).ContinueWith(
+                requestedRadiusKm, _cfg.AirportMarkersEnabled,
+                cancellation.Token).ContinueWith(
                 delegate(Task<SkyReading> task)
                 {
+                    if (generation != _skyRefreshGeneration) return;
                     _skyRefreshBusy = false;
+                    if (_skyRefreshCancellation == cancellation)
+                    {
+                        _skyRefreshCancellation.Dispose();
+                        _skyRefreshCancellation = null;
+                    }
                     if (!task.IsCanceled && !task.IsFaulted &&
                         task.Result.AircraftRadiusKm == _cfg.AircraftRadiusKm)
+                    {
+                        ApplyAirportMarkerPreference(task.Result);
                         _sky = task.Result;
+                    }
                     else if (!task.IsCanceled && !task.IsFaulted)
                         _nextSkyRefreshUtc = DateTime.MinValue;
                     ApplyAmbientUi();
@@ -2682,7 +3276,15 @@ namespace ProjectorDash
                 return;
             }
 
-            if (!_sky.AircraftFeedAvailable)
+            if (!_cfg.SkyNetworkEnabled || !_sky.ExternalFeedsEnabled)
+            {
+                _skyCountText.Text = "LIVE DATA OFF";
+                if (_aircraftSourceText != null)
+                    _aircraftSourceText.Text = "AIR TRAFFIC  /  REQUESTS DISABLED";
+                _aircraftText.Text =
+                    "No Sky Now network polling · tap LIVE DATA OFF to resume";
+            }
+            else if (!_sky.AircraftFeedAvailable)
             {
                 _skyCountText.Text = "FEED OFFLINE";
                 if (_aircraftSourceText != null)
@@ -2715,7 +3317,11 @@ namespace ProjectorDash
             }
 
             List<string> orbit = new List<string>();
-            if (_sky.Iss.Available)
+            if (!_cfg.SkyNetworkEnabled || !_sky.ExternalFeedsEnabled)
+            {
+                orbit.Add("ISS feed disabled");
+            }
+            else if (_sky.Iss.Available)
             {
                 orbit.Add(_sky.Iss.AboveHorizon
                     ? "ISS " + Math.Round(_sky.Iss.ElevationDegrees).ToString("0") + "° " +
@@ -2723,6 +3329,18 @@ namespace ProjectorDash
                     : "ISS below horizon");
             }
             else orbit.Add("ISS feed offline");
+            if (_sky.Iss.PassPredictionAvailable)
+                orbit.Add(IssPassSummary(_sky.Iss, DateTime.UtcNow));
+            else if (_cfg.SkyNetworkEnabled && _sky.Iss.Available)
+                orbit.Add("No ISS pass in the next 36h");
+            if (_cfg.AirportMarkersEnabled && _sky.Airports.Count > 0)
+            {
+                AirportReading nearestAirport = _sky.Airports[0];
+                orbit.Add("Airport " + nearestAirport.Code + " " +
+                    Math.Round(nearestAirport.DistanceKm).ToString("0") + " km " +
+                    AmbientService.Direction(nearestAirport.BearingDegrees,
+                        _cfg.FacingDegrees));
+            }
             int planetLimit = Math.Min(3, _sky.Planets.Count);
             for (int i = 0; i < planetLimit; i++)
             {
@@ -2744,13 +3362,39 @@ namespace ProjectorDash
 
             if (_projector != null)
             {
-                string planes = _sky.AircraftFeedAvailable
+                string planes = (!_cfg.SkyNetworkEnabled || !_sky.ExternalFeedsEnabled)
+                    ? "Live aircraft + ISS feeds off"
+                    : (_sky.AircraftFeedAvailable
                     ? (_sky.Planes.Count == 0 ? "No nearby aircraft" :
                         _sky.Planes.Count.ToString() + " aircraft nearby")
-                    : "Aircraft feed offline";
+                    : "Aircraft feed offline");
                 _projector.UpdateSky(planes + "  ·  " + string.Join("  ·  ", orbit.ToArray()));
             }
             UpdateOverheadUi();
+        }
+
+        private static string IssPassSummary(IssReading iss, DateTime nowUtc)
+        {
+            if (iss == null || !iss.PassPredictionAvailable) return "";
+            bool passActive = iss.NextSetUtc != DateTime.MinValue &&
+                nowUtc >= iss.NextRiseUtc && nowUtc < iss.NextSetUtc;
+            if (passActive)
+                return "ISS overhead (TLE) · sets in " + ShortDuration(iss.NextSetUtc - nowUtc) +
+                    " · peak " + Math.Round(iss.PassPeakElevationDegrees).ToString("0") + "° est.";
+            return "Next ISS pass (TLE) " + ShortDuration(iss.NextRiseUtc - nowUtc) +
+                " · " + iss.NextRiseUtc.ToLocalTime().ToString("h:mm tt") +
+                " · peak " + Math.Round(iss.PassPeakElevationDegrees).ToString("0") + "° est.";
+        }
+
+        private static string ShortDuration(TimeSpan remaining)
+        {
+            if (remaining.TotalSeconds < 0.0) remaining = TimeSpan.Zero;
+            if (remaining.TotalHours >= 1.0)
+                return ((int)remaining.TotalHours).ToString() + "h " +
+                    remaining.Minutes.ToString("00") + "m";
+            if (remaining.TotalMinutes >= 1.0)
+                return Math.Max(0, remaining.Minutes).ToString() + "m";
+            return Math.Max(0, remaining.Seconds).ToString() + "s";
         }
 
         private void RefreshAudioDeviceLists()
@@ -2901,6 +3545,14 @@ namespace ProjectorDash
             return b;
         }
 
+        private Button TimeStepBtn(string text, RoutedEventHandler click)
+        {
+            Button b = SmallBtn(text, click);
+            b.MinWidth = 98;
+            b.Margin = new Thickness(0, 0, 8, 8);
+            return b;
+        }
+
         private TextBlock FieldLabel(string text)
         {
             TextBlock t = Ui.Label(text, 15, Ui.TextDim);
@@ -3004,6 +3656,8 @@ namespace ProjectorDash
         {
             int i = _shortcutList.SelectedIndex;
             if (i < 0 || i >= _cfg.Shortcuts.Count) return;
+            ShortcutItem removed = _cfg.Shortcuts[i];
+            ForgetShortcutAssociation(removed);
             _cfg.Shortcuts.RemoveAt(i);
             _cfg.Save();
             RefreshShortcutList(Math.Min(i, _cfg.Shortcuts.Count - 1));
@@ -3036,10 +3690,17 @@ namespace ProjectorDash
                     "Projector Dashboard");
                 return;
             }
+            string newTarget = _editTarget.Text.Trim();
+            string newArgs = _editArgs.Text.Trim();
+            if (!string.Equals(s.Target ?? "", newTarget,
+                StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(s.Args ?? "", newArgs,
+                StringComparison.Ordinal))
+                ForgetShortcutAssociation(s);
             s.Name = string.IsNullOrEmpty(_editName.Text.Trim())
                 ? "Shortcut" : _editName.Text.Trim();
-            s.Target = _editTarget.Text.Trim();
-            s.Args = _editArgs.Text.Trim();
+            s.Target = newTarget;
+            s.Args = newArgs;
             _cfg.Save();
             RefreshShortcutList(i);
             RebuildTiles();
@@ -3053,6 +3714,7 @@ namespace ProjectorDash
                 string target = (_cfg.Shortcuts[i].Target ?? "").Trim();
                 if (target.Length == 0 || target == "https://" || target == "http://")
                 {
+                    ForgetShortcutAssociation(_cfg.Shortcuts[i]);
                     _cfg.Shortcuts.RemoveAt(i);
                     changed = true;
                 }
@@ -3182,22 +3844,17 @@ namespace ProjectorDash
             UpdateAutoLockUi();
         }
 
-        private void SaveAutoLockTime()
+        private void ChangeAutoLockTime(int deltaMinutes)
         {
-            DateTime parsed;
-            if (_autoLockTime == null ||
-                !DateTime.TryParse(_autoLockTime.Text.Trim(), out parsed))
-            {
-                MessageBox.Show(this, "Enter a time like 1:00 AM or 23:00.",
-                    "Projector Dashboard");
-                return;
-            }
-            _cfg.AutoLockHour = parsed.Hour;
-            _cfg.AutoLockMinute = parsed.Minute;
+            int minutes = (_cfg.AutoLockHour * 60) +
+                _cfg.AutoLockMinute + deltaMinutes;
+            minutes %= 24 * 60;
+            if (minutes < 0) minutes += 24 * 60;
+            _cfg.AutoLockHour = minutes / 60;
+            _cfg.AutoLockMinute = minutes % 60;
             _cfg.Save();
             _lastAutoLockDate = DateTime.MinValue;
             UpdateAutoLockUi();
-            if (_autoLockPopup != null) _autoLockPopup.IsOpen = false;
         }
 
         private void UpdateAutoLockUi()
@@ -3206,7 +3863,8 @@ namespace ProjectorDash
                 .AddMinutes(_cfg.AutoLockMinute);
             string label = _cfg.AutoLockEnabled
                 ? "Auto-lock: " + time.ToString("h:mm tt") : "Auto-lock: Off";
-            if (_autoLockTime != null) _autoLockTime.Text = time.ToString("h:mm tt");
+            if (_autoLockTimePickerText != null)
+                _autoLockTimePickerText.Text = time.ToString("h:mm tt");
             if (_autoLockBtn != null)
             {
                 _autoLockBtn.Content = label;
@@ -3236,21 +3894,16 @@ namespace ProjectorDash
             }
         }
 
-        private void SaveAlarmTime()
+        private void ChangeAlarmTime(int deltaMinutes)
         {
-            DateTime parsed;
-            if (_editAlarmTime == null ||
-                !DateTime.TryParse(_editAlarmTime.Text.Trim(), out parsed))
-            {
-                MessageBox.Show(this,
-                    "Enter a time like 7:30 AM or 19:30.",
-                    "Projector Dashboard");
-                return;
-            }
-            _cfg.AlarmHour = parsed.Hour;
-            _cfg.AlarmMinute = parsed.Minute;
+            int minutes = (_cfg.AlarmHour * 60) + _cfg.AlarmMinute + deltaMinutes;
+            minutes %= 24 * 60;
+            if (minutes < 0) minutes += 24 * 60;
+            _cfg.AlarmHour = minutes / 60;
+            _cfg.AlarmMinute = minutes % 60;
             _cfg.Save();
             _lastAlarmDate = DateTime.MinValue;
+            _snoozeUntil = DateTime.MinValue;
             UpdateAlarmUi();
         }
 
@@ -3259,7 +3912,7 @@ namespace ProjectorDash
             DateTime alarmTime = DateTime.Today.AddHours(_cfg.AlarmHour)
                 .AddMinutes(_cfg.AlarmMinute);
             string time = alarmTime.ToString("h:mm tt");
-            if (_editAlarmTime != null) _editAlarmTime.Text = time;
+            if (_alarmTimePickerText != null) _alarmTimePickerText.Text = time;
             if (_alarmToggleBtn != null)
             {
                 _alarmToggleBtn.Content = _cfg.AlarmEnabled ? "Alarm: On" : "Alarm: Off";

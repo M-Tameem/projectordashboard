@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Net;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 
@@ -67,7 +68,19 @@ namespace ProjectorDash
         public double ElevationDegrees;
         public double BearingDegrees;
         public double DistanceKm;
+        public bool PassPredictionAvailable;
+        public bool PassInProgress;
+        public DateTime NextRiseUtc;
+        public DateTime NextSetUtc;
+        public double PassPeakElevationDegrees;
         public bool AboveHorizon { get { return Available && ElevationDegrees > 0.0; } }
+    }
+
+    public sealed class AirportReading
+    {
+        public string Code;
+        public double DistanceKm;
+        public double BearingDegrees;
     }
 
     public sealed class PlanetReading
@@ -90,6 +103,7 @@ namespace ProjectorDash
         public readonly List<PlaneReading> Planes = new List<PlaneReading>();
         public readonly List<PlanetReading> Planets = new List<PlanetReading>();
         public readonly List<StarReading> Stars = new List<StarReading>();
+        public readonly List<AirportReading> Airports = new List<AirportReading>();
         public IssReading Iss = new IssReading();
         public DateTime UpdatedUtc;
         public bool AircraftFeedAvailable;
@@ -99,12 +113,15 @@ namespace ProjectorDash
         public double ObserverLatitude;
         public double ObserverLongitude;
         public int AircraftRadiusKm = 40;
+        public bool ExternalFeedsEnabled = true;
+        public bool AirportMarkersEnabled = true;
     }
 
     /// <summary>
     /// Tiny, dependency-free ambient data client. All remote services are
     /// public, need no key/account, and are called off the UI thread. Planet
-    /// positions are calculated locally from JPL's approximate orbital model.
+    /// positions use JPL's approximate orbital model; ISS position/pass times
+    /// use a cached TLE with local Kepler/J2 propagation.
     /// </summary>
     public static class AmbientService
     {
@@ -116,6 +133,21 @@ namespace ProjectorDash
         private static double _fallbackLatitude;
         private static double _fallbackLongitude;
         private static int _fallbackRadiusKm;
+        private static readonly object IssSync = new object();
+        private static IssOrbitModel _issOrbitModel;
+
+        private sealed class IssOrbitModel
+        {
+            public DateTime EpochUtc;
+            public DateTime FetchedUtc;
+            public double InclinationRadians;
+            public double RightAscensionRadians;
+            public double Eccentricity;
+            public double ArgumentPerigeeRadians;
+            public double MeanAnomalyRadians;
+            public double MeanMotionRadiansSecond;
+            public double SemiMajorAxisKm;
+        }
 
         public static async Task<AmbientLocation> FindLocationAsync(string search)
         {
@@ -182,17 +214,55 @@ namespace ProjectorDash
         public static async Task<SkyReading> GetSkyAsync(double latitude, double longitude,
             int aircraftRadiusKm)
         {
+            return await GetSkyAsync(latitude, longitude, aircraftRadiusKm,
+                CancellationToken.None);
+        }
+
+        public static SkyReading GetLocalSky(double latitude, double longitude,
+            int aircraftRadiusKm)
+        {
+            return GetLocalSky(latitude, longitude, aircraftRadiusKm, true);
+        }
+
+        public static SkyReading GetLocalSky(double latitude, double longitude,
+            int aircraftRadiusKm, bool airportMarkersEnabled)
+        {
             aircraftRadiusKm = AppConfig.NormalizeAircraftRadius(aircraftRadiusKm);
             SkyReading result = new SkyReading();
             result.ObserverLatitude = latitude;
             result.ObserverLongitude = longitude;
             result.AircraftRadiusKm = aircraftRadiusKm;
+            result.ExternalFeedsEnabled = false;
+            result.AirportMarkersEnabled = airportMarkersEnabled;
+            if (airportMarkersEnabled)
+                result.Airports.AddRange(AirportCatalog.FindNearby(latitude, longitude));
+            result.Iss = GetCachedIssPrediction(latitude, longitude);
             result.Planets.AddRange(CalculatePlanets(DateTime.UtcNow, latitude, longitude));
             result.Stars.AddRange(CalculateStars(DateTime.UtcNow, latitude, longitude));
+            result.UpdatedUtc = DateTime.UtcNow;
+            return result;
+        }
+
+        public static async Task<SkyReading> GetSkyAsync(double latitude, double longitude,
+            int aircraftRadiusKm, CancellationToken cancellationToken)
+        {
+            return await GetSkyAsync(latitude, longitude, aircraftRadiusKm, true,
+                cancellationToken);
+        }
+
+        public static async Task<SkyReading> GetSkyAsync(double latitude, double longitude,
+            int aircraftRadiusKm, bool airportMarkersEnabled,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            aircraftRadiusKm = AppConfig.NormalizeAircraftRadius(aircraftRadiusKm);
+            SkyReading result = GetLocalSky(latitude, longitude, aircraftRadiusKm,
+                airportMarkersEnabled);
+            result.ExternalFeedsEnabled = true;
 
             Task<PlaneFeedResult> planes = GetPlanesAsync(latitude, longitude,
-                aircraftRadiusKm);
-            Task<IssReading> iss = GetIssAsync(latitude, longitude);
+                aircraftRadiusKm, cancellationToken);
+            Task<IssReading> iss = GetIssAsync(latitude, longitude, cancellationToken);
             try
             {
                 PlaneFeedResult feed = await planes;
@@ -202,6 +272,7 @@ namespace ProjectorDash
             }
             catch (Exception ex)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 result.AircraftFeedAvailable = false;
                 result.AircraftError = DescribeNetworkError(ex);
             }
@@ -212,9 +283,11 @@ namespace ProjectorDash
             }
             catch
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 result.Iss = new IssReading();
                 result.IssFeedAvailable = false;
             }
+            cancellationToken.ThrowIfCancellationRequested();
             result.UpdatedUtc = DateTime.UtcNow;
             return result;
         }
@@ -226,7 +299,8 @@ namespace ProjectorDash
         }
 
         private static async Task<PlaneFeedResult> GetPlanesAsync(
-            double latitude, double longitude, int radiusKm)
+            double latitude, double longitude, int radiusKm,
+            CancellationToken cancellationToken)
         {
             string lat = latitude.ToString("0.#####", CultureInfo.InvariantCulture);
             string lon = longitude.ToString("0.#####", CultureInfo.InvariantCulture);
@@ -240,10 +314,15 @@ namespace ProjectorDash
                 PlaneFeedResult primary = new PlaneFeedResult();
                 primary.Name = "adsb.lol";
                 primary.Planes = await GetPlanesFromAsync(
-                    "https://api.adsb.lol" + suffix, latitude, longitude, radiusKm);
+                    "https://api.adsb.lol" + suffix, latitude, longitude, radiusKm,
+                    cancellationToken);
                 return primary;
             }
-            catch (Exception ex) { primaryError = ex; }
+            catch (Exception ex)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                primaryError = ex;
+            }
 
             List<PlaneReading> cached = GetCachedFallbackPlanes(latitude, longitude,
                 radiusKm);
@@ -261,12 +340,14 @@ namespace ProjectorDash
                 PlaneFeedResult fallback = new PlaneFeedResult();
                 fallback.Name = "airplanes.live fallback · quota-safe 3 min sync";
                 fallback.Planes = await GetPlanesFromAsync(
-                    "https://api.airplanes.live" + suffix, latitude, longitude, radiusKm);
+                    "https://api.airplanes.live" + suffix, latitude, longitude, radiusKm,
+                    cancellationToken);
                 StoreFallbackPlanes(fallback.Planes, latitude, longitude, radiusKm);
                 return fallback;
             }
             catch (Exception fallbackError)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 throw new InvalidOperationException("adsb.lol " +
                     DescribeNetworkError(primaryError) + "; airplanes.live " +
                     DescribeNetworkError(fallbackError), fallbackError);
@@ -327,9 +408,11 @@ namespace ProjectorDash
         }
 
         private static async Task<List<PlaneReading>> GetPlanesFromAsync(
-            string url, double latitude, double longitude, int radiusKm)
+            string url, double latitude, double longitude, int radiusKm,
+            CancellationToken cancellationToken)
         {
-            Dictionary<string, object> root = AsObject(await DownloadAsync(url));
+            Dictionary<string, object> root = AsObject(await DownloadAsync(
+                url, cancellationToken));
             object raw;
             List<PlaneReading> result = new List<PlaneReading>();
             if (!root.TryGetValue("ac", out raw)) return result;
@@ -381,9 +464,18 @@ namespace ProjectorDash
             }
             result.Sort(delegate(PlaneReading a, PlaneReading b)
             {
-                return a.DistanceKm.CompareTo(b.DistanceKm);
+                double aElevation = AircraftElevationDegrees(a.DistanceKm,
+                    a.AltitudeFeet);
+                double bElevation = AircraftElevationDegrees(b.DistanceKm,
+                    b.AltitudeFeet);
+                int elevationOrder = bElevation.CompareTo(aElevation);
+                return elevationOrder != 0 ? elevationOrder :
+                    a.DistanceKm.CompareTo(b.DistanceKm);
             });
-            if (result.Count > 12) result.RemoveRange(12, result.Count - 12);
+            // Preserve enough high-elevation traffic that nearby low aircraft
+            // cannot crowd every airliner out of the response before the map
+            // applies its own label limit.
+            if (result.Count > 24) result.RemoveRange(24, result.Count - 24);
             return result;
         }
 
@@ -412,42 +504,293 @@ namespace ProjectorDash
         }
 
         private static async Task<IssReading> GetIssAsync(
-            double latitude, double longitude)
+            double latitude, double longitude, CancellationToken cancellationToken)
         {
-            Dictionary<string, object> root = AsObject(await DownloadAsync(
-                "https://api.wheretheiss.at/v1/satellites/25544"));
-            double issLat = NumberValue(root, "latitude");
-            double issLon = NumberValue(root, "longitude");
-            double issAltitude = NumberValue(root, "altitude");
+            IssOrbitModel model;
+            lock (IssSync) model = _issOrbitModel;
+            if (model == null ||
+                (DateTime.UtcNow - model.FetchedUtc).TotalHours >= 6.0)
+            {
+                Dictionary<string, object> root = AsObject(await DownloadAsync(
+                    "https://api.wheretheiss.at/v1/satellites/25544/tles",
+                    cancellationToken));
+                model = ParseIssTle(StringValue(root, "line1"),
+                    StringValue(root, "line2"));
+                lock (IssSync) _issOrbitModel = model;
+            }
 
-            double obsLat = latitude * Deg;
-            double obsLon = longitude * Deg;
-            double satLat = issLat * Deg;
-            double satLon = issLon * Deg;
-            double satRadius = EarthRadiusKm + issAltitude;
+            IssReading result = CalculateIssReading(model, DateTime.UtcNow,
+                latitude, longitude);
+            ApplyIssPassPrediction(result, model, latitude, longitude);
+            return result;
+        }
 
-            double ox = EarthRadiusKm * Math.Cos(obsLat) * Math.Cos(obsLon);
-            double oy = EarthRadiusKm * Math.Cos(obsLat) * Math.Sin(obsLon);
-            double oz = EarthRadiusKm * Math.Sin(obsLat);
-            double sx = satRadius * Math.Cos(satLat) * Math.Cos(satLon);
-            double sy = satRadius * Math.Cos(satLat) * Math.Sin(satLon);
-            double sz = satRadius * Math.Sin(satLat);
-            double dx = sx - ox;
-            double dy = sy - oy;
-            double dz = sz - oz;
+        private static IssReading GetCachedIssPrediction(double latitude,
+            double longitude)
+        {
+            IssOrbitModel model;
+            lock (IssSync) model = _issOrbitModel;
+            if (model == null ||
+                (DateTime.UtcNow - model.FetchedUtc).TotalHours >= 24.0)
+                return new IssReading();
 
-            double east = -Math.Sin(obsLon) * dx + Math.Cos(obsLon) * dy;
-            double north = -Math.Sin(obsLat) * Math.Cos(obsLon) * dx -
-                Math.Sin(obsLat) * Math.Sin(obsLon) * dy + Math.Cos(obsLat) * dz;
-            double up = Math.Cos(obsLat) * Math.Cos(obsLon) * dx +
-                Math.Cos(obsLat) * Math.Sin(obsLon) * dy + Math.Sin(obsLat) * dz;
+            IssReading result = CalculateIssReading(model, DateTime.UtcNow,
+                latitude, longitude);
+            // A cached TLE may still drive the local pass clock while live
+            // feeds are off, but it is not presented as a live ISS fix.
+            result.Available = false;
+            ApplyIssPassPrediction(result, model, latitude, longitude);
+            return result;
+        }
+
+        private static IssOrbitModel ParseIssTle(string line1, string line2)
+        {
+            if (string.IsNullOrWhiteSpace(line1) || line1.Length < 32 ||
+                string.IsNullOrWhiteSpace(line2) || line2.Length < 63)
+                throw new InvalidOperationException("The ISS service returned an invalid TLE.");
+
+            int epochYear = ParseTleInt(line1, 18, 2);
+            epochYear += epochYear < 57 ? 2000 : 1900;
+            double epochDay = ParseTleDouble(line1, 20, 12);
+            DateTime epoch = new DateTime(epochYear, 1, 1, 0, 0, 0,
+                DateTimeKind.Utc).AddDays(epochDay - 1.0);
+            double meanMotion = ParseTleDouble(line2, 52, 11) *
+                2.0 * Math.PI / 86400.0;
+            const double earthMu = 398600.4418;
+
+            return new IssOrbitModel
+            {
+                EpochUtc = epoch,
+                FetchedUtc = DateTime.UtcNow,
+                InclinationRadians = ParseTleDouble(line2, 8, 8) * Deg,
+                RightAscensionRadians = ParseTleDouble(line2, 17, 8) * Deg,
+                Eccentricity = ParseTleDouble("0." + line2.Substring(26, 7),
+                    0, 9),
+                ArgumentPerigeeRadians = ParseTleDouble(line2, 34, 8) * Deg,
+                MeanAnomalyRadians = ParseTleDouble(line2, 43, 8) * Deg,
+                MeanMotionRadiansSecond = meanMotion,
+                SemiMajorAxisKm = Math.Pow(earthMu / (meanMotion * meanMotion),
+                    1.0 / 3.0)
+            };
+        }
+
+        private static int ParseTleInt(string value, int start, int length)
+        {
+            int parsed;
+            if (!int.TryParse(value.Substring(start, length).Trim(),
+                NumberStyles.Integer, CultureInfo.InvariantCulture, out parsed))
+                throw new InvalidOperationException("The ISS service returned an invalid TLE.");
+            return parsed;
+        }
+
+        private static double ParseTleDouble(string value, int start, int length)
+        {
+            double parsed;
+            if (!double.TryParse(value.Substring(start, length).Trim(),
+                NumberStyles.Float, CultureInfo.InvariantCulture, out parsed))
+                throw new InvalidOperationException("The ISS service returned an invalid TLE.");
+            return parsed;
+        }
+
+        private static IssReading CalculateIssReading(IssOrbitModel model,
+            DateTime atUtc, double observerLatitude, double observerLongitude)
+        {
+            double[] eci = PropagateIssEci(model, atUtc);
+            double sidereal = GreenwichSiderealRadians(atUtc);
+            double satelliteX = Math.Cos(sidereal) * eci[0] +
+                Math.Sin(sidereal) * eci[1];
+            double satelliteY = -Math.Sin(sidereal) * eci[0] +
+                Math.Cos(sidereal) * eci[1];
+            double satelliteZ = eci[2];
+
+            double lat = observerLatitude * Deg;
+            double lon = observerLongitude * Deg;
+            double observerX = EarthRadiusKm * Math.Cos(lat) * Math.Cos(lon);
+            double observerY = EarthRadiusKm * Math.Cos(lat) * Math.Sin(lon);
+            double observerZ = EarthRadiusKm * Math.Sin(lat);
+            double dx = satelliteX - observerX;
+            double dy = satelliteY - observerY;
+            double dz = satelliteZ - observerZ;
+            double east = -Math.Sin(lon) * dx + Math.Cos(lon) * dy;
+            double north = -Math.Sin(lat) * Math.Cos(lon) * dx -
+                Math.Sin(lat) * Math.Sin(lon) * dy + Math.Cos(lat) * dz;
+            double up = Math.Cos(lat) * Math.Cos(lon) * dx +
+                Math.Cos(lat) * Math.Sin(lon) * dy + Math.Sin(lat) * dz;
 
             IssReading result = new IssReading();
             result.Available = true;
             result.DistanceKm = Math.Sqrt(dx * dx + dy * dy + dz * dz);
-            result.ElevationDegrees = Math.Atan2(up, Math.Sqrt(east * east + north * north)) / Deg;
+            result.ElevationDegrees = Math.Atan2(up,
+                Math.Sqrt(east * east + north * north)) / Deg;
             result.BearingDegrees = NormalizeDegrees(Math.Atan2(east, north) / Deg);
             return result;
+        }
+
+        private static double[] PropagateIssEci(IssOrbitModel model,
+            DateTime atUtc)
+        {
+            const double earthJ2 = 1.08262668e-3;
+            const double equatorialRadiusKm = 6378.137;
+            double elapsed = (atUtc - model.EpochUtc).TotalSeconds;
+            double e = model.Eccentricity;
+            double a = model.SemiMajorAxisKm;
+            double p = a * (1.0 - e * e);
+            double cosI = Math.Cos(model.InclinationRadians);
+            double correction = earthJ2 *
+                Math.Pow(equatorialRadiusKm / p, 2.0) *
+                model.MeanMotionRadiansSecond;
+            double ascendingNode = model.RightAscensionRadians -
+                1.5 * correction * cosI * elapsed;
+            double argumentPerigee = model.ArgumentPerigeeRadians +
+                0.75 * correction * (5.0 * cosI * cosI - 1.0) * elapsed;
+            double correctedMeanMotion = model.MeanMotionRadiansSecond +
+                0.75 * correction * Math.Sqrt(1.0 - e * e) *
+                (3.0 * cosI * cosI - 1.0);
+            double meanAnomaly = NormalizeRadians(model.MeanAnomalyRadians +
+                correctedMeanMotion * elapsed);
+
+            double eccentricAnomaly = meanAnomaly;
+            for (int i = 0; i < 10; i++)
+            {
+                double delta = (eccentricAnomaly - e * Math.Sin(eccentricAnomaly) -
+                    meanAnomaly) / (1.0 - e * Math.Cos(eccentricAnomaly));
+                eccentricAnomaly -= delta;
+                if (Math.Abs(delta) < 1e-11) break;
+            }
+
+            double orbitalX = a * (Math.Cos(eccentricAnomaly) - e);
+            double orbitalY = a * Math.Sqrt(1.0 - e * e) *
+                Math.Sin(eccentricAnomaly);
+            double cosO = Math.Cos(ascendingNode);
+            double sinO = Math.Sin(ascendingNode);
+            double cosW = Math.Cos(argumentPerigee);
+            double sinW = Math.Sin(argumentPerigee);
+            double sinI = Math.Sin(model.InclinationRadians);
+            return new double[]
+            {
+                (cosO * cosW - sinO * sinW * cosI) * orbitalX +
+                    (-cosO * sinW - sinO * cosW * cosI) * orbitalY,
+                (sinO * cosW + cosO * sinW * cosI) * orbitalX +
+                    (-sinO * sinW + cosO * cosW * cosI) * orbitalY,
+                sinW * sinI * orbitalX + cosW * sinI * orbitalY
+            };
+        }
+
+        private static void ApplyIssPassPrediction(IssReading reading,
+            IssOrbitModel model, double observerLatitude, double observerLongitude)
+        {
+            if (model == null) return;
+            DateTime now = DateTime.UtcNow;
+            DateTime limit = now.AddHours(36.0);
+            double elevationNow = PredictedIssElevation(model, now,
+                observerLatitude, observerLongitude);
+            DateTime rise;
+            DateTime set;
+            if (elevationNow > 0.0)
+            {
+                reading.PassInProgress = true;
+                rise = FindPreviousIssRise(model, now.AddMinutes(-15), now,
+                    observerLatitude, observerLongitude);
+                if (rise == DateTime.MinValue) rise = now;
+                set = FindIssHorizonCrossing(model, now, limit,
+                    observerLatitude, observerLongitude, false);
+            }
+            else
+            {
+                rise = FindIssHorizonCrossing(model, now, limit,
+                    observerLatitude, observerLongitude, true);
+                if (rise == DateTime.MinValue) return;
+                set = FindIssHorizonCrossing(model, rise.AddSeconds(5), limit,
+                    observerLatitude, observerLongitude, false);
+            }
+
+            reading.PassPredictionAvailable = true;
+            reading.NextRiseUtc = rise;
+            reading.NextSetUtc = set;
+            DateTime peakEnd = set == DateTime.MinValue ? rise.AddMinutes(12) : set;
+            double peak = Math.Max(0.0, PredictedIssElevation(model, rise,
+                observerLatitude, observerLongitude));
+            for (DateTime at = rise; at <= peakEnd; at = at.AddSeconds(10))
+                peak = Math.Max(peak, PredictedIssElevation(model, at,
+                    observerLatitude, observerLongitude));
+            reading.PassPeakElevationDegrees = peak;
+        }
+
+        private static DateTime FindPreviousIssRise(IssOrbitModel model,
+            DateTime start, DateTime end, double latitude, double longitude)
+        {
+            DateTime found = DateTime.MinValue;
+            DateTime previousAt = start;
+            double previous = PredictedIssElevation(model, previousAt,
+                latitude, longitude);
+            for (DateTime at = start.AddSeconds(15); at <= end;
+                at = at.AddSeconds(15))
+            {
+                double current = PredictedIssElevation(model, at, latitude, longitude);
+                if (previous <= 0.0 && current > 0.0)
+                    found = RefineIssHorizonCrossing(model, previousAt, at,
+                        latitude, longitude, true);
+                previousAt = at;
+                previous = current;
+            }
+            return found;
+        }
+
+        private static DateTime FindIssHorizonCrossing(IssOrbitModel model,
+            DateTime start, DateTime limit, double latitude, double longitude,
+            bool rising)
+        {
+            DateTime previousAt = start;
+            double previous = PredictedIssElevation(model, previousAt,
+                latitude, longitude);
+            for (DateTime at = start.AddSeconds(30); at <= limit;
+                at = at.AddSeconds(30))
+            {
+                double current = PredictedIssElevation(model, at, latitude, longitude);
+                bool crossed = rising
+                    ? previous <= 0.0 && current > 0.0
+                    : previous > 0.0 && current <= 0.0;
+                if (crossed)
+                    return RefineIssHorizonCrossing(model, previousAt, at,
+                        latitude, longitude, rising);
+                previousAt = at;
+                previous = current;
+            }
+            return DateTime.MinValue;
+        }
+
+        private static DateTime RefineIssHorizonCrossing(IssOrbitModel model,
+            DateTime low, DateTime high, double latitude, double longitude,
+            bool rising)
+        {
+            for (int i = 0; i < 14; i++)
+            {
+                DateTime middle = low.AddTicks((high - low).Ticks / 2);
+                bool above = PredictedIssElevation(model, middle,
+                    latitude, longitude) > 0.0;
+                if (rising ? above : !above) high = middle;
+                else low = middle;
+            }
+            return high;
+        }
+
+        private static double PredictedIssElevation(IssOrbitModel model,
+            DateTime atUtc, double observerLatitude, double observerLongitude)
+        {
+            return CalculateIssReading(model, atUtc, observerLatitude,
+                observerLongitude).ElevationDegrees;
+        }
+
+        private static double GreenwichSiderealRadians(DateTime utc)
+        {
+            return NormalizeDegrees(280.46061837 + 360.98564736629 *
+                (JulianDate(utc) - 2451545.0)) * Deg;
+        }
+
+        private static double NormalizeRadians(double value)
+        {
+            value %= 2.0 * Math.PI;
+            return value < 0.0 ? value + 2.0 * Math.PI : value;
         }
 
         public static string WeatherDescription(int code)
@@ -748,13 +1091,35 @@ namespace ProjectorDash
 
         private static async Task<string> DownloadAsync(string url)
         {
+            return await DownloadAsync(url, CancellationToken.None);
+        }
+
+        private static async Task<string> DownloadAsync(string url,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
             ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072; // TLS 1.2 on .NET 4.5
             using (WebClient client = new TimeoutWebClient())
             {
                 client.Encoding = System.Text.Encoding.UTF8;
                 client.Headers[HttpRequestHeader.UserAgent] =
                     "ProjectorDashboard/" + SelfUpdater.CurrentVersion;
-                return await client.DownloadStringTaskAsync(new Uri(url)).ConfigureAwait(false);
+                using (CancellationTokenRegistration registration =
+                    cancellationToken.Register(client.CancelAsync))
+                {
+                    try
+                    {
+                        string response = await client.DownloadStringTaskAsync(
+                            new Uri(url)).ConfigureAwait(false);
+                        cancellationToken.ThrowIfCancellationRequested();
+                        return response;
+                    }
+                    catch (WebException)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        throw;
+                    }
+                }
             }
         }
 

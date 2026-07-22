@@ -7,6 +7,10 @@ namespace ProjectorDash
 {
     public class ShortcutItem
     {
+        // Stable per-tile identity. The dashboard also tags the launched HWND
+        // with a compact token derived from this id, so an already-open tile
+        // can be recovered after a dashboard/theme/mode restart.
+        public string Id = "";
         public string Name;
         public string Target;   // http(s) URL, .exe path, document, or anything ShellExecute understands
         public string Args;     // optional command-line arguments
@@ -31,6 +35,7 @@ namespace ProjectorDash
 
         public ShortcutItem(string name, string target)
         {
+            Id = Guid.NewGuid().ToString("N");
             Name = name;
             Target = target;
             Args = "";
@@ -74,11 +79,24 @@ namespace ProjectorDash
         public int FacingDegrees = 0;
         public bool UseFahrenheit = false;
 
+        // Master switch for Sky Now's remote aircraft and ISS feeds. Local
+        // planet/star calculations remain available while this is disabled.
+        public bool SkyNetworkEnabled = true;
+
+        // Offline horizon labels for the nearest IATA-coded airports. These
+        // use the bundled catalog and never make a network request.
+        public bool AirportMarkersEnabled = true;
+
         // Whole-app color palette and the saved radius used for free ADS-B
         // point queries. Radius changes are applied explicitly by the UI so
         // tapping +/- never burns requests while the user is deciding.
         public string ColorTheme = "Cyan";
         public int AircraftRadiusKm = 40;
+
+        // Perceived projector brightness. This drives the dashboard's
+        // click-through dimmer because ordinary HDMI output does not expose a
+        // portable hardware-brightness API for projectors.
+        public int ProjectorBrightnessPercent = 100;
 
         // How launched shortcuts occupy the projector. Fullscreen removes the
         // normal window frame; false keeps the frame and maximizes the window.
@@ -177,6 +195,7 @@ namespace ProjectorDash
                         changed = true;
                     }
                     changed |= RemoveEmptyShortcuts(cfg.Shortcuts);
+                    changed |= EnsureShortcutIds(cfg.Shortcuts);
                     changed |= MigrateGpuCompat(cfg.Shortcuts);
                     changed |= EnsureBuiltInShortcuts(cfg.Shortcuts);
                     // One-time migration from the original touch-pad default.
@@ -200,6 +219,13 @@ namespace ProjectorDash
                     if (aircraftRadius != cfg.AircraftRadiusKm)
                     {
                         cfg.AircraftRadiusKm = aircraftRadius;
+                        changed = true;
+                    }
+                    int projectorBrightness = NormalizePercent(
+                        cfg.ProjectorBrightnessPercent);
+                    if (projectorBrightness != cfg.ProjectorBrightnessPercent)
+                    {
+                        cfg.ProjectorBrightnessPercent = projectorBrightness;
                         changed = true;
                     }
                     if (string.IsNullOrEmpty(cfg.BrowserPath))
@@ -233,6 +259,8 @@ namespace ProjectorDash
                 ClampLocation();
                 ColorTheme = Ui.NormalizeTheme(ColorTheme);
                 AircraftRadiusKm = NormalizeAircraftRadius(AircraftRadiusKm);
+                ProjectorBrightnessPercent = NormalizePercent(
+                    ProjectorBrightnessPercent);
                 XmlSerializer ser = new XmlSerializer(typeof(AppConfig));
                 using (FileStream fs = File.Create(ConfigPath()))
                 {
@@ -284,6 +312,13 @@ namespace ProjectorDash
             if (value < 20) value = 20;
             if (value > 460) value = 460;
             return ((value + 10) / 20) * 20;
+        }
+
+        public static int NormalizePercent(int value)
+        {
+            if (value < 0) return 0;
+            if (value > 100) return 100;
+            return value;
         }
 
         private static List<ShortcutItem> DefaultShortcuts()
@@ -353,6 +388,24 @@ namespace ProjectorDash
                 item.GpuDisableVsync = true;
                 item.GpuCompat = false;
                 changed = true;
+            }
+            return changed;
+        }
+
+        private static bool EnsureShortcutIds(List<ShortcutItem> list)
+        {
+            bool changed = false;
+            HashSet<string> used = new HashSet<string>(
+                StringComparer.OrdinalIgnoreCase);
+            foreach (ShortcutItem item in list)
+            {
+                if (item == null) continue;
+                if (string.IsNullOrEmpty(item.Id) || used.Contains(item.Id))
+                {
+                    item.Id = Guid.NewGuid().ToString("N");
+                    changed = true;
+                }
+                used.Add(item.Id);
             }
             return changed;
         }
