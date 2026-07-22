@@ -62,6 +62,18 @@ namespace ProjectorDash
         // "clock" or "blank"
         public string ProjectorMode = "clock";
 
+        // One-time manual location for weather and the overhead display. We
+        // deliberately do not use Windows Location Services: it is unreliable
+        // on the target Windows 8.1 tablet and would add another permission/
+        // hardware dependency. FacingDegrees is true-north clockwise and lets
+        // bearings also be described relative to the view from bed.
+        public bool LocationConfigured = false;
+        public string LocationName = "";
+        public double Latitude = 0.0;
+        public double Longitude = 0.0;
+        public int FacingDegrees = 0;
+        public bool UseFahrenheit = false;
+
         // How launched shortcuts occupy the projector. Fullscreen removes the
         // normal window frame; false keeps the frame and maximizes the window.
         // Field initializer intentionally migrates older config files to the
@@ -171,6 +183,7 @@ namespace ProjectorDash
                     cfg.ClampReserved();
                     cfg.ClampAlarm();
                     cfg.ClampAutoLock();
+                    cfg.ClampLocation();
                     if (string.IsNullOrEmpty(cfg.BrowserPath))
                     {
                         cfg.BrowserPath = DetectSupermium();
@@ -199,6 +212,7 @@ namespace ProjectorDash
                 ClampReserved();
                 ClampAlarm();
                 ClampAutoLock();
+                ClampLocation();
                 XmlSerializer ser = new XmlSerializer(typeof(AppConfig));
                 using (FileStream fs = File.Create(ConfigPath()))
                 {
@@ -233,6 +247,16 @@ namespace ProjectorDash
             if (AutoLockHour > 23) AutoLockHour = 23;
             if (AutoLockMinute < 0) AutoLockMinute = 0;
             if (AutoLockMinute > 59) AutoLockMinute = 59;
+        }
+
+        private void ClampLocation()
+        {
+            if (Latitude < -90.0) Latitude = -90.0;
+            if (Latitude > 90.0) Latitude = 90.0;
+            if (Longitude < -180.0) Longitude = -180.0;
+            if (Longitude > 180.0) Longitude = 180.0;
+            FacingDegrees %= 360;
+            if (FacingDegrees < 0) FacingDegrees += 360;
         }
 
         private static List<ShortcutItem> DefaultShortcuts()
