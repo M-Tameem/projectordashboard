@@ -18,11 +18,23 @@ internal static class WindowInputTests
 {
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr hwnd, int command);
+    [DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(System.Drawing.Point point);
     [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr w, IntPtr l);
     private static int passed;
     private static void Check(bool ok, string message)
     {
-        if (!ok) throw new Exception(message);
+        if (!ok)
+        {
+            System.Drawing.Rectangle bounds = Forms.SystemInformation.VirtualScreen;
+            using (System.Drawing.Bitmap image = new System.Drawing.Bitmap(bounds.Width, bounds.Height))
+            using (System.Drawing.Graphics graphics = System.Drawing.Graphics.FromImage(image))
+            {
+                graphics.CopyFromScreen(bounds.Left, bounds.Top, 0, 0, image.Size);
+                Directory.CreateDirectory(".visual-check");
+                image.Save(".visual-check/input-failure.png");
+            }
+            throw new Exception(message);
+        }
         passed++; Console.WriteLine("PASS: " + message);
     }
     private static void Pump()
@@ -144,7 +156,12 @@ internal static class WindowInputTests
             finger.Up(); Pump();
             Check(Count(hwnd, 1) == 0, "Moving a finger does not click");
             finger = new Contact(2, surface); finger.Down(70, 40); finger.Up(); Pump();
-            Check(Count(hwnd, 1) == 1 && Count(hwnd, 4) == 1, "A routed tap reaches the external app as one click and release");
+            for (int i = 0; i < 10 && Count(hwnd, 4) == 0; i++) Pump();
+            Check(Count(hwnd, 1) == 1 && Count(hwnd, 4) == 1,
+                "A routed tap reaches the external app as one click and release (down=" + Count(hwnd, 1) +
+                ", up=" + Count(hwnd, 4) + ", cursor=" + Forms.Cursor.Position +
+                ", hit=" + WindowFromPoint(Forms.Cursor.Position) + ", target=" + hwnd +
+                ", foreground=" + GetForegroundWindow() + ", status=" + ((TextBlock)Field(pad, "_status")).Text + ")");
             typeof(NativeTrackpad).GetMethod("Click", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(pad, new object[] { true }); Pump();
             Check(Count(hwnd, 2) == 1, "Right click reaches the external app");
             TrackpadGesture gesture = (TrackpadGesture)Field(pad, "_gesture");
