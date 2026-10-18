@@ -18,6 +18,7 @@ internal static class WindowInputTests
 {
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr hwnd, int command);
+    [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr hwnd);
     [DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(System.Drawing.Point point);
     [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr w, IntPtr l);
     private static int passed;
@@ -138,6 +139,10 @@ internal static class WindowInputTests
             unrelated.Kill(); unrelated.WaitForExit(); unrelated.Dispose(); unrelated = null;
             own.Close(); own = null;
             ScreenUtil.PlaceExternalWindow(hwnd, Forms.Screen.PrimaryScreen, true);
+            Check(!IsIconic(hwnd), "Resuming a minimized window clears its minimized state");
+            ShowWindow(hwnd, 6); Pump();
+            ScreenUtil.PlaceExternalWindow(hwnd, Forms.Screen.PrimaryScreen, true);
+            Check(!IsIconic(hwnd), "An already-borderless minimized app also resumes correctly");
             NativeTrackpad pad = new NativeTrackpad(delegate { return Forms.Screen.PrimaryScreen; }, delegate { return hwnd; }, null);
             padWindow = new Window { Content = pad, Width = 390, Height = 420, Left = 0, Top = 0, Topmost = true };
             padWindow.Show(); padWindow.Activate(); Pump();

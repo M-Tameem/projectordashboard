@@ -346,10 +346,14 @@ namespace ProjectorDash
             if (fullscreen)
             {
                 int style = GetWindowLong(hwnd, GWL_STYLE);
-                if ((style & (WS_CAPTION | WS_THICKFRAME)) != 0 ||
+                if (IsIconic(hwnd) || (style & (WS_CAPTION | WS_THICKFRAME)) != 0 ||
                     (style & WS_POPUP) == 0)
                 {
                     ShowWindow(hwnd, SW_RESTORE);
+                    // Restore changes WS_MINIMIZE/WS_MAXIMIZE. Reusing the
+                    // pre-restore bits can put a resumed window back in its
+                    // minimized state while it appears to fill the screen.
+                    style = GetWindowLong(hwnd, GWL_STYLE);
                 }
                 style &= ~(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX |
                     WS_MAXIMIZEBOX | WS_SYSMENU);
