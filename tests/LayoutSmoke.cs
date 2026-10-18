@@ -34,6 +34,15 @@ internal static class LayoutSmoke
             SaveImage(root, "dashboard-" + size.Width + "x" + size.Height);
             Console.WriteLine("Dashboard layout: " + size);
         }
+        MethodInfo openSettings = typeof(ControllerWindow).GetMethod("OpenSettings",
+            BindingFlags.NonPublic | BindingFlags.Instance, null, new Type[] { typeof(int) }, null);
+        foreach (int page in new int[] { 1, 2 })
+        {
+            openSettings.Invoke(window, new object[] { page });
+            root.Measure(new Size(1366, 768)); root.Arrange(new Rect(0, 0, 1366, 768)); root.UpdateLayout();
+            CheckControls(root, root, false);
+            SaveImage(root, "settings-" + page);
+        }
         // Force all shared button templates and both remote pages through layout.
         RemoteControlWindow remote = new RemoteControlWindow(System.Windows.Forms.Screen.PrimaryScreen,
             delegate(int key) { }, delegate(int delta) { }, delegate { }, delegate { },
