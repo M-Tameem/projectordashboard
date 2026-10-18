@@ -31,9 +31,8 @@ internal static class WindowInputTests
     private static Process StartFixture(string path)
     {
         Process p = Process.Start(new ProcessStartInfo(path, "fixture") { UseShellExecute = false });
-        if (!p.WaitForInputIdle(10000)) throw new Exception("Fixture did not start");
         for (int i = 0; i < 50 && p.MainWindowHandle == IntPtr.Zero; i++) { Thread.Sleep(100); p.Refresh(); }
-        if (p.MainWindowHandle == IntPtr.Zero) throw new Exception("Fixture has no HWND");
+        if (p.MainWindowHandle == IntPtr.Zero) { if (!p.HasExited) p.Kill(); p.Dispose(); throw new Exception("Fixture has no HWND"); }
         return p;
     }
     private sealed class Fixture : Forms.Form
