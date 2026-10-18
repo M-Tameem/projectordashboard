@@ -40,7 +40,11 @@ namespace ProjectorDash
             AddMeter(totals, 2, "CPU", out _cpu, out _cpuBar);
             Children.Add(totals);
             _browser = Note("Supermium: waiting for a sample", 15);
-            Grid.SetRow(_browser, 1); Children.Add(_browser);
+            StackPanel summary = new StackPanel();
+            summary.Children.Add(_browser);
+            _status = Note("Reading usage… CPU needs two samples.", 13);
+            summary.Children.Add(_status);
+            Grid.SetRow(summary, 1); Children.Add(summary);
             WrapPanel actions = new WrapPanel { Margin = new Thickness(0, 8, 0, 8) };
             actions.Children.Add(ActionButton("Sort: RAM", delegate { _sort = 0; RenderRows(); }));
             actions.Children.Add(ActionButton("Sort: Private", delegate { _sort = 1; RenderRows(); }));
@@ -84,6 +88,14 @@ namespace ProjectorDash
             AddColumn("RAM", "Ram", new DataGridLength(105));
             AddColumn("Private", "PrivateMemory", new DataGridLength(105));
             AddColumn("CPU", "Cpu", new DataGridLength(85));
+            _processes.Columns[0].MinWidth = 180;
+            _processes.SizeChanged += delegate
+            {
+                // The surrounding settings ScrollViewer can measure star
+                // columns before a viewport exists. Keep names readable on
+                // that first pass, then fill the available viewport exactly.
+                _processes.Columns[0].Width = new DataGridLength(Math.Max(180, _processes.ActualWidth - 395));
+            };
             _processes.SelectionChanged += delegate { UpdateSelection(); };
             ScrollViewer.SetPanningMode(_processes, PanningMode.VerticalOnly);
             Grid.SetRow(_processes, 3); Children.Add(_processes);
@@ -97,7 +109,6 @@ namespace ProjectorDash
             Grid.SetColumn(_end, 1); selection.Children.Add(_end);
             Grid.SetRow(selection, 4); Children.Add(selection);
             StackPanel notes = new StackPanel();
-            _status = Note("Reading usage… CPU needs two samples.", 13); notes.Children.Add(_status);
             notes.Children.Add(Note("RAM is each process's working set, including shared pages; rows won't add up to total RAM. Private is its committed private memory. CPU is a percentage of all processors. A 32-bit app can exhaust its address space even when RAM is available. These readings show current pressure, not the cause of a past crash.", 12));
             Grid.SetRow(notes, 5); Children.Add(notes);
             _timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
@@ -131,7 +142,13 @@ namespace ProjectorDash
             Grid.SetColumn(card, column); host.Children.Add(card);
         }
         private void AddColumn(string title, string property, DataGridLength width)
-        { _processes.Columns.Add(new DataGridTextColumn { Header = title, Binding = new Binding(property), Width = width }); }
+        {
+            Style text = new Style(typeof(TextBlock));
+            text.Setters.Add(new Setter(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center));
+            text.Setters.Add(new Setter(FrameworkElement.MarginProperty, new Thickness(10, 0, 10, 0)));
+            text.Setters.Add(new Setter(TextBlock.TextTrimmingProperty, TextTrimming.CharacterEllipsis));
+            _processes.Columns.Add(new DataGridTextColumn { Header = title, Binding = new Binding(property), Width = width, ElementStyle = text });
+        }
         private void Sample()
         {
             if (_busy || _paused || !IsVisible) return;

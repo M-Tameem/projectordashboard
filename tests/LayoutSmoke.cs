@@ -56,7 +56,7 @@ internal static class LayoutSmoke
                 ResourceSnapshot sample = new ResourceSnapshot { RamTotal = 2147483648UL, RamAvailable = 134217728,
                     CommitUsed = 3800000000, CommitLimit = 4000000000, CommitPeak = 3900000000, CpuPercent = 78, Captured = DateTime.Now };
                 for (int i = 0; i < 25; i++) sample.Processes.Add(new ProcessUsage { Id = 100 + i, Name = "Supermium · chrome", Browser = true,
-                    RamBytes = 120000000, PrivateBytes = 160000000, CpuPercent = i == 0 ? 35 : 1.2 });
+                    RamBytes = 120000000, PrivateBytes = 100000000, CpuPercent = i == 0 ? 35 : 1.2 });
                 ((ResourcePanel)pages[5]).ShowSnapshot(sample);
             }
             root.Measure(new Size(1366, 768)); root.Arrange(new Rect(0, 0, 1366, 768)); root.UpdateLayout();
