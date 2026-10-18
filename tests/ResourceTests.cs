@@ -19,6 +19,12 @@ internal static class ResourceTests
         }
         ResourceMonitor monitor = new ResourceMonitor();
         ResourceSnapshot first = monitor.Sample("");
+        Check(first.ServiceError.Length == 0, "Service names are read directly from Windows without WMI");
+        ProcessUsage serviceHost = first.Processes.Find(delegate(ProcessUsage p) { return p.ServiceHost && p.Services.Count > 0; });
+        Check(serviceHost != null, "Running Windows service names are matched to a service-host PID");
+        Check(serviceHost.DisplayName.Contains(serviceHost.Services[0].DisplayName) &&
+            serviceHost.ServiceNames.Contains(serviceHost.Services[0].Name), "Service host shows friendly and technical service names");
+        Check(!ResourceMonitor.CanEndTask(serviceHost), "Service discovery does not enable ending protected hosts");
         int self = Process.GetCurrentProcess().Id;
         Check(first.RamTotal > 0 && first.RamAvailable <= first.RamTotal, "Native physical RAM totals are valid");
         Check(first.CommitLimit > 0 && first.CommitUsed <= first.CommitLimit && first.CommitPeak >= first.CommitUsed,

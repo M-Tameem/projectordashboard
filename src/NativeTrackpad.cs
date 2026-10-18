@@ -12,21 +12,25 @@ namespace ProjectorDash
     {
         private readonly Func<WinForms.Screen> _screen;
         private readonly Func<IntPtr> _target;
+        private readonly Func<bool> _showPointerMarker;
         private readonly TrackpadGesture _gesture = new TrackpadGesture();
         private readonly Stopwatch _time = Stopwatch.StartNew();
         private readonly TextBlock _status;
         private readonly Button _drag;
         private readonly Border _surface;
         private IntPtr _window;
+        private PointerMarkerWindow _pointerMarker;
         private System.Drawing.Rectangle _bounds;
         private string _device;
         private double _x, _y;
         private bool _buttonDown;
         private bool _releasingCapture;
 
-        public NativeTrackpad(Func<WinForms.Screen> screen, Func<IntPtr> target, Action keyboard)
+        public NativeTrackpad(Func<WinForms.Screen> screen, Func<IntPtr> target, Action keyboard,
+            Func<bool> showPointerMarker = null)
         {
             _screen = screen; _target = target;
+            _showPointerMarker = showPointerMarker ?? delegate { return true; };
             Background = Ui.Panel;
             BorderBrush = Ui.Line;
             BorderThickness = new Thickness(1);
@@ -121,6 +125,7 @@ namespace ProjectorDash
                 Microsoft.Win32.SystemEvents.SessionSwitch -= OnSessionSwitch;
                 Microsoft.Win32.SystemEvents.DisplaySettingsChanged -= OnDisplayChange;
                 Cancel();
+                if (_pointerMarker != null) { _pointerMarker.Close(); _pointerMarker = null; }
             };
         }
 
@@ -201,9 +206,16 @@ namespace ProjectorDash
                 !ScreenUtil.InjectPointer(_x, _y, flags, data))
             {
                 ReleaseButton();
+                if (_pointerMarker != null) _pointerMarker.Dismiss();
                 _status.Text = "Input unavailable · reopen the app";
                 return false;
             }
+            if (_showPointerMarker())
+            {
+                if (_pointerMarker == null) _pointerMarker = new PointerMarkerWindow();
+                _pointerMarker.ShowAt(_x, _y);
+            }
+            else if (_pointerMarker != null) _pointerMarker.Dismiss();
             return true;
         }
         private void Click(bool right)
@@ -221,6 +233,7 @@ namespace ProjectorDash
         }
         public void Cancel()
         {
+            if (_pointerMarker != null) _pointerMarker.Dismiss();
             _gesture.Cancel(); ReleaseButton();
             _releasingCapture = true;
             if (_surface != null) _surface.ReleaseAllTouchCaptures();

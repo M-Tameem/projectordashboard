@@ -103,6 +103,7 @@ namespace ProjectorDash
         // Field initializer intentionally migrates older config files to the
         // new, projector-first behaviour.
         public bool LaunchFullscreen = true;
+        public bool ShowPointerMarker = true;
 
         // Lightweight daily alarm (24-hour clock). Disabled by default.
         public bool AlarmEnabled = false;

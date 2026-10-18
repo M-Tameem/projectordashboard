@@ -16,6 +16,17 @@ namespace ProjectorDash
         public long VirtualBytes { get; set; }
         public double? CpuPercent { get; set; }
         public bool Browser { get; set; }
+        public bool ServiceHost { get; set; }
+        public List<HostedService> Services = new List<HostedService>();
+        public string DisplayName
+        {
+            get { return !ServiceHost || Services.Count == 0 ? Name : "Service host · " + Services[0].DisplayName +
+                (Services.Count == 1 ? "" : " + " + (Services.Count - 1) + " more"); }
+        }
+        public string ServiceNames
+        {
+            get { return string.Join(", ", Services.ConvertAll(delegate(HostedService s) { return s.ToString(); }).ToArray()); }
+        }
         public string Ram { get { return ResourceMonitor.Bytes((ulong)Math.Max(0, RamBytes)); } }
         public string PrivateMemory { get { return ResourceMonitor.Bytes((ulong)Math.Max(0, PrivateBytes)); } }
         public string Cpu { get { return CpuPercent.HasValue ? CpuPercent.Value.ToString("0.0") + "%" : "—"; } }
@@ -27,6 +38,7 @@ namespace ProjectorDash
         public double? CpuPercent;
         public DateTime Captured;
         public int Unavailable;
+        public string ServiceError = "";
         public List<ProcessUsage> Processes = new List<ProcessUsage>();
     }
 
@@ -89,6 +101,7 @@ namespace ProjectorDash
             double elapsed = _sampleTime == 0 ? 0 : (now - _sampleTime) / (double)Stopwatch.Frequency;
             Dictionary<int, Baseline> next = new Dictionary<int, Baseline>();
             Dictionary<string, bool> browserMatches = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+            Dictionary<int, List<HostedService>> services = ServiceCatalog.Read(out sample.ServiceError);
             foreach (Process process in Process.GetProcesses())
             {
                 using (process)
@@ -118,6 +131,9 @@ namespace ProjectorDash
                             browserMatches[path] = browser;
                         }
                         usage.Browser = browser;
+                        usage.ServiceHost = string.Equals(usage.Name, "svchost", StringComparison.OrdinalIgnoreCase);
+                        List<HostedService> hosted;
+                        if (services.TryGetValue(usage.Id, out hosted)) usage.Services = hosted;
                         if (browser) usage.Name = "Supermium · " + usage.Name;
                         sample.Processes.Add(usage);
                     }

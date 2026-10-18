@@ -57,6 +57,11 @@ internal static class LayoutSmoke
                     CommitUsed = 3800000000, CommitLimit = 4000000000, CommitPeak = 3900000000, CpuPercent = 78, Captured = DateTime.Now };
                 for (int i = 0; i < 25; i++) sample.Processes.Add(new ProcessUsage { Id = 100 + i, Name = "Supermium · chrome", Browser = true,
                     RamBytes = 120000000, PrivateBytes = 100000000, CpuPercent = i == 0 ? 35 : 1.2 });
+                ProcessUsage host = new ProcessUsage { Id = 4242, Name = "svchost", ServiceHost = true,
+                    RamBytes = 700000000, PrivateBytes = 850000000, CpuPercent = 14 };
+                host.Services.Add(new HostedService { Name = "wuauserv", DisplayName = "Windows Update" });
+                host.Services.Add(new HostedService { Name = "BITS", DisplayName = "Background Intelligent Transfer Service" });
+                sample.Processes.Add(host);
                 ((ResourcePanel)pages[5]).ShowSnapshot(sample);
             }
             root.Measure(new Size(1366, 768)); root.Arrange(new Rect(0, 0, 1366, 768)); root.UpdateLayout();

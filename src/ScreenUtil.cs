@@ -429,6 +429,8 @@ namespace ProjectorDash
         // Absolute coordinates include negative-origin displays and span the
         // virtual desktop. INPUT's union preserves the native x86/x64 layout.
         // https://learn.microsoft.com/windows/win32/api/winuser/ns-winuser-mouseinput
+        internal const uint PointerInputTag = 0x50444153;
+
         public static bool InjectPointer(double x, double y, uint flags, int data)
         {
             System.Drawing.Rectangle desktop = SystemInformation.VirtualScreen;
@@ -437,6 +439,7 @@ namespace ProjectorDash
             input.data.mouse.dy = PointerMath.Normalize(y, desktop.Top, desktop.Height);
             input.data.mouse.flags = 0x8000 | 0x4000 | 0x0001 | flags;
             input.data.mouse.mouseData = unchecked((uint)data);
+            input.data.mouse.extraInfo = new IntPtr(PointerInputTag);
             return SendInput(1, new NativeInput[] { input },
                 Marshal.SizeOf(typeof(NativeInput))) == 1;
         }

@@ -14,7 +14,8 @@ namespace ProjectorDash
     {
         public RemoteControlWindow(WinForms.Screen tablet, Action<int> sendKey,
             Action<int> adjustVolume, Action toggleMute, Action showKeyboard,
-            Func<WinForms.Screen> targetScreen, Func<IntPtr> targetWindow, bool trackpadEnabled)
+            Func<WinForms.Screen> targetScreen, Func<IntPtr> targetWindow, bool trackpadEnabled,
+            Func<bool> showPointerMarker = null)
         {
             Title = "Current app remote";
             Width = 760;
@@ -94,7 +95,7 @@ namespace ProjectorDash
             shell.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
             Grid tabs = ButtonRow(2);
             tabs.Margin = new Thickness(0, 0, 0, 14);
-            NativeTrackpad trackpad = new NativeTrackpad(targetScreen, targetWindow, showKeyboard);
+            NativeTrackpad trackpad = new NativeTrackpad(targetScreen, targetWindow, showKeyboard, showPointerMarker);
             trackpad.Visibility = Visibility.Collapsed;
             Button playbackTab = null, trackpadTab = null;
             playbackTab = Ui.Btn("Playback", 17, Ui.AccentDim, Ui.Accent, delegate

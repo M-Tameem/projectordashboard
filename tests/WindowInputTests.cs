@@ -17,6 +17,8 @@ using Forms = System.Windows.Forms;
 internal static class WindowInputTests
 {
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] private static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
+    [DllImport("user32.dll")] private static extern int GetWindowLong(IntPtr hwnd, int index);
     [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr hwnd, int command);
     [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr hwnd);
     [DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(System.Drawing.Point point);
@@ -158,7 +160,15 @@ internal static class WindowInputTests
             System.Drawing.Point cursor = Forms.Cursor.Position;
             Check(Math.Abs(cursor.X - (bounds.Left + bounds.Width / 2 + 40)) <= 2 &&
                 Math.Abs(cursor.Y - (bounds.Top + bounds.Height / 2 + 20)) <= 2, "Routed touch moves the actual Windows pointer");
+            PointerMarkerWindow marker = (PointerMarkerWindow)Field(pad, "_pointerMarker");
+            IntPtr markerHwnd = new WindowInteropHelper(marker).Handle;
+            Check(marker.IsVisible, "Trackpad input automatically displays the software pointer guide");
+            Check(GetForegroundWindow() != markerHwnd && !ScreenUtil.IsExternalAppWindow(markerHwnd),
+                "Pointer guide neither takes focus nor becomes an app target");
+            Check((GetWindowLong(markerHwnd, -20) & 0x08080020) == 0x08080020,
+                "Pointer guide is layered, click-through and non-activating");
             finger.Up(); Pump();
+            Check(marker.IsVisible, "Pointer guide remains visible while hovering after lifting a finger");
             Check(Count(hwnd, 1) == 0, "Moving a finger does not click");
             finger = new Contact(2, surface); finger.Down(70, 40); finger.Up(); Pump();
             for (int i = 0; i < 10 && Count(hwnd, 4) == 0; i++) Pump();
@@ -186,6 +196,16 @@ internal static class WindowInputTests
             Check(Count(hwnd, 3) == 2, "Scrolling continues after focus moves to the app");
             second.Up(); finger.Up(); Pump();
             Check(Count(hwnd, 1) == 2, "Lifting scroll fingers does not click the app");
+            marker = (PointerMarkerWindow)Field(pad, "_pointerMarker");
+            Check(marker.IsVisible, "Guide stays available after scrolling");
+            mouse_event(1, 1, 0, 0, UIntPtr.Zero); Pump();
+            Check(!marker.IsVisible, "Another mouse controller dismisses the guide automatically");
+            Check((IntPtr)Field(marker, "_hook") == IntPtr.Zero, "Hidden pointer guide removes its mouse hook");
+            typeof(NativeTrackpad).GetMethod("Click", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(pad, new object[] { true }); Pump();
+            Check(marker.IsVisible, "Returning to trackpad input restores its guide");
+            pad.Cancel();
+            Check(!marker.IsVisible && (IntPtr)Field(marker, "_hook") == IntPtr.Zero,
+                "Cancellation hides the guide and releases the hook");
             Console.WriteLine("Window/input integration: " + passed + " checks passed");
             return 0;
         }

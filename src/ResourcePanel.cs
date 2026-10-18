@@ -16,11 +16,12 @@ namespace ProjectorDash
         private readonly DispatcherTimer _timer;
         private ResourceMonitor _monitor = new ResourceMonitor();
         private ResourceSnapshot _snapshot;
-        private readonly TextBlock _ram, _commit, _cpu, _browser, _status, _detail;
+        private readonly TextBlock _ram, _commit, _cpu, _browser, _status, _detail, _serviceSummary;
         private readonly ProgressBar _ramBar, _commitBar, _cpuBar;
         private readonly DataGrid _processes;
         private readonly Button _end, _pause, _filter;
-        private bool _busy, _paused, _browserOnly;
+        private bool _busy, _paused;
+        private int _processFilter;
         private int _generation, _sort;
 
         public ResourcePanel(Func<string> browserPath)
@@ -44,6 +45,8 @@ namespace ProjectorDash
             summary.Children.Add(_browser);
             _status = Note("Reading usage… CPU needs two samples.", 13);
             summary.Children.Add(_status);
+            _serviceSummary = Note("", 13);
+            summary.Children.Add(_serviceSummary);
             Grid.SetRow(summary, 1); Children.Add(summary);
             WrapPanel actions = new WrapPanel { Margin = new Thickness(0, 8, 0, 8) };
             actions.Children.Add(ActionButton("Sort: RAM", delegate { _sort = 0; RenderRows(); }));
@@ -51,7 +54,9 @@ namespace ProjectorDash
             actions.Children.Add(ActionButton("Sort: CPU", delegate { _sort = 2; RenderRows(); }));
             _filter = ActionButton("All processes", delegate
             {
-                _browserOnly = !_browserOnly; _filter.Content = _browserOnly ? "Supermium only" : "All processes"; RenderRows();
+                _processFilter = (_processFilter + 1) % 3;
+                _filter.Content = new string[] { "All processes", "Supermium only", "Service hosts only" }[_processFilter];
+                RenderRows();
             });
             actions.Children.Add(_filter);
             _pause = ActionButton("Pause", delegate
@@ -83,7 +88,7 @@ namespace ProjectorDash
             selected.Setters.Add(new Setter(Control.BackgroundProperty, Ui.AccentDim));
             selected.Setters.Add(new Setter(Control.ForegroundProperty, Ui.Accent));
             cell.Triggers.Add(selected); _processes.CellStyle = cell;
-            AddColumn("Process", "Name", new DataGridLength(1, DataGridLengthUnitType.Star));
+            AddColumn("Process / hosted services", "DisplayName", new DataGridLength(1, DataGridLengthUnitType.Star));
             AddColumn("PID", "Id", new DataGridLength(78));
             AddColumn("RAM", "Ram", new DataGridLength(105));
             AddColumn("Private", "PrivateMemory", new DataGridLength(105));
@@ -184,6 +189,14 @@ namespace ProjectorDash
             foreach (ProcessUsage process in snapshot.Processes) if (process.Browser)
             { count++; memory += (ulong)Math.Max(0, process.PrivateBytes); cpu += process.CpuPercent ?? 0; known |= process.CpuPercent.HasValue; }
             _browser.Text = "Supermium · " + count + " processes · " + ResourceMonitor.Bytes(memory) + " private memory · " + (known ? cpu.ToString("0.0") + "% CPU" : "CPU measuring…");
+            ProcessUsage largestHost = null;
+            foreach (ProcessUsage process in snapshot.Processes)
+                if (process.ServiceHost && (largestHost == null || process.PrivateBytes > largestHost.PrivateBytes)) largestHost = process;
+            _serviceSummary.Text = snapshot.ServiceError.Length > 0 ? "Windows service names unavailable: " + snapshot.ServiceError
+                : largestHost == null ? "No service-host process was readable in this sample."
+                : "Largest service host · PID " + largestHost.Id + " · " + largestHost.PrivateMemory + " private · " + largestHost.Ram + " RAM\n" +
+                  (largestHost.Services.Count == 0 ? "No running services could be matched to this process."
+                    : largestHost.ServiceNames) + "\nMemory belongs to the whole host; this does not identify which shared service allocated it.";
             string pressure = _commitBar.Value >= 90 ? "Commit nearly full · allocations may fail. " : _ramBar.Value >= 90 ? "RAM pressure · paging may slow playback. " : "";
             _status.Text = pressure + ResourceMonitor.Bytes(snapshot.RamAvailable) + " RAM available · peak commit " + ResourceMonitor.Bytes(snapshot.CommitPeak) +
                 " · updated " + snapshot.Captured.ToString("h:mm:ss") + (snapshot.Unavailable == 0 ? "" : " · " + snapshot.Unavailable + " processes unavailable");
@@ -193,7 +206,8 @@ namespace ProjectorDash
         {
             if (_snapshot == null) return;
             ProcessUsage selected = _processes.SelectedItem as ProcessUsage;
-            List<ProcessUsage> rows = _snapshot.Processes.FindAll(delegate(ProcessUsage p) { return !_browserOnly || p.Browser; });
+            List<ProcessUsage> rows = _snapshot.Processes.FindAll(delegate(ProcessUsage p)
+                { return _processFilter == 0 || (_processFilter == 1 ? p.Browser : p.ServiceHost); });
             rows.Sort(delegate(ProcessUsage a, ProcessUsage b)
             {
                 int order = _sort == 2 ? (b.CpuPercent ?? -1).CompareTo(a.CpuPercent ?? -1)
@@ -209,7 +223,8 @@ namespace ProjectorDash
             _end.IsEnabled = ResourceMonitor.CanEndTask(selected);
             _detail.Text = selected == null ? "Select a process. Windows processes and this dashboard are protected."
                 : selected.Name + " · PID " + selected.Id + " · virtual address space " + ResourceMonitor.Bytes((ulong)Math.Max(0, selected.VirtualBytes)) +
-                    (_end.IsEnabled ? "" : " · cannot end here");
+                    (_end.IsEnabled ? "" : " · cannot end here") +
+                    (selected.Services.Count == 0 ? "" : "\nHosted services: " + selected.ServiceNames);
         }
         private void EndSelected(object sender, RoutedEventArgs e)
         {

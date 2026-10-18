@@ -79,11 +79,13 @@ Open **Memory + CPU** on the main screen or its Settings tab. The panel shows us
 
 Sampling runs in the background every two seconds only while the panel is visible. The table virtualizes rows. CPU needs two samples and is normalized across all logical processors. RAM working sets include shared pages, so their sum is not the system's RAM usage. High commit usage can explain allocation failures; 32-bit apps can also run out of address space independently. These are live readings, not a diagnosis of an earlier crash.
 
+Windows service hosts are identified automatically using the native Service Control Manager. The largest `svchost` by private memory is summarized with its RAM usage and hosted service names, and the process filter includes **Service hosts only**. Select any host to see all readable hosted services. Memory/CPU totals belong to the process as a whole; they do not prove which shared service made an allocation. This lookup runs only while the panel is visible, uses no WMI or command prompt, and does not stop or disable services.
+
 **End task** asks for confirmation and may discard unsaved work. It checks the selected process's start time again to avoid killing a different process after PID reuse. Windows/critical processes, other sessions, inaccessible processes, and the dashboard itself cannot be ended here.
 
 ## Built-in trackpad
 
-No TouchMousePointer or other mouse utility is required. Close any old mouse overlay so it does not cover the new controls. Launch an app, then use the trackpad on the right:
+No TouchMousePointer or other mouse utility is required. A high-contrast pointer ring is enabled by default so the click position stays visible if Windows suppresses or flickers its hardware cursor during touch input. It is a visual workaround, not a graphics-driver repair. The small window passes input through, never takes focus, and updates only on trackpad input. It disappears when another mouse controller takes over, the trackpad is cancelled/hidden, or the session/display changes. **Settings > Projector > Pointer guide** can turn it off; no system cursor settings are changed. Close any old mouse overlay so it does not cover the new controls. Launch an app, then use the trackpad on the right:
 
 - Slide one finger to move the projector's pointer. Lift and reposition your finger to keep moving.
 - Tap to click; tap twice to double-click. **Click** and **Right click** are also explicit buttons.
@@ -131,6 +133,8 @@ src\Ui.cs                 theme, rounded controls, finger-sized TouchSlider
 src\NativeTrackpad.cs     WPF touch surface + native Windows pointer input
 src\TrackpadGesture.cs    event-driven tap, scroll, drag, and coordinate logic
 src\ResourceMonitor.cs    native memory/CPU sampling and guarded task controls
+src\ServiceCatalog.cs     read-only service names grouped by Windows process
+src\PointerMarkerWindow.cs event-driven click-through pointer visibility guide
 src\ResourcePanel.cs      visible-only task-manager view
 src\DisplayPickerWindow.cs first-run screen assignment with identify flashes
 src\ControllerWindow.cs   the tablet UI + settings overlay

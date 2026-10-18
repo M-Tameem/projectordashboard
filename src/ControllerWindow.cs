@@ -529,7 +529,7 @@ namespace ProjectorDash
             remote.Children.Add(playback);
             _trackpad = new NativeTrackpad(delegate { return GetProjectorScreen(false); },
                 delegate { if (_projectorSleeping) WakeProjector(); return CurrentRemoteTarget(); },
-                delegate { ShowTouchKeyboard(); });
+                delegate { ShowTouchKeyboard(); }, delegate { return _cfg.ShowPointerMarker; });
             Grid.SetRow(_trackpad, 1); remote.Children.Add(_trackpad);
             if (_cfg.TabletOnlyMode)
             {
@@ -1936,7 +1936,8 @@ namespace ProjectorDash
                     delegate { ToggleRemoteMute(); },
                     delegate { ShowTouchKeyboard(); },
                     delegate { return GetProjectorScreen(false); },
-                    delegate { if (_projectorSleeping) WakeProjector(); return CurrentRemoteTarget(); }, !_cfg.TabletOnlyMode);
+                    delegate { if (_projectorSleeping) WakeProjector(); return CurrentRemoteTarget(); }, !_cfg.TabletOnlyMode,
+                    delegate { return _cfg.ShowPointerMarker; });
             }
             if (!_remoteWindow.IsVisible) _remoteWindow.Show();
             ScreenUtil.PlaceRemoteOverlay(_remoteWindow, tablet,
@@ -2649,6 +2650,16 @@ namespace ProjectorDash
                 delegate { ToggleTabletOnlyMode(); });
             modeRow.Children.Add(_tabletModeBtn);
             left.Children.Add(modeRow);
+            Button pointerGuide = null;
+            pointerGuide = SmallBtn("Pointer guide: " + (_cfg.ShowPointerMarker ? "On" : "Off"), delegate
+            {
+                _cfg.ShowPointerMarker = !_cfg.ShowPointerMarker;
+                pointerGuide.Content = "Pointer guide: " + (_cfg.ShowPointerMarker ? "On" : "Off");
+                if (_trackpad != null) _trackpad.Cancel();
+                _cfg.Save();
+            });
+            left.Children.Add(pointerGuide);
+            left.Children.Add(WrappedNote("Keeps a visible ring at the trackpad's click position when Windows hides the cursor. It turns off when a mouse takes over."));
             left.Children.Add(WrappedNote(
                 _cfg.TabletOnlyMode
                 ? "Tablet-only launches fullscreen here and keeps Dashboard, Screen off, and emergency-off controls above the app. Screen off leaves playback and audio running; Hide only puts the app away without closing its tabs."
