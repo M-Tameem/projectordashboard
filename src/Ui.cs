@@ -248,6 +248,58 @@ namespace ProjectorDash
             return _flatTemplate;
         }
 
+        private static ControlTemplate _comboTemplate;
+        public static ControlTemplate ComboTemplate()
+        {
+            if (_comboTemplate == null)
+                _comboTemplate = (ControlTemplate)XamlReader.Parse(@"
+<ControlTemplate TargetType='ComboBox' xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'
+ xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml'>
+ <Grid x:Name='comboRoot'>
+  <Border Background='{TemplateBinding Background}' BorderBrush='{TemplateBinding BorderBrush}' BorderThickness='1' CornerRadius='12'/>
+  <ToggleButton Focusable='False' IsChecked='{Binding IsDropDownOpen, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}'>
+   <ToggleButton.Template><ControlTemplate TargetType='ToggleButton'><Border Background='Transparent'/></ControlTemplate></ToggleButton.Template>
+  </ToggleButton>
+  <ContentPresenter Margin='14,8,40,8' VerticalAlignment='Center' IsHitTestVisible='False'
+   Content='{TemplateBinding SelectionBoxItem}' ContentTemplate='{TemplateBinding SelectionBoxItemTemplate}'/>
+  <TextBlock Text='⌄' Margin='0,0,16,0' HorizontalAlignment='Right' VerticalAlignment='Center' IsHitTestVisible='False'/>
+  <Popup x:Name='PART_Popup' Placement='Bottom' IsOpen='{TemplateBinding IsDropDownOpen}' AllowsTransparency='True' Focusable='False'>
+   <Border Background='{TemplateBinding Background}' BorderBrush='{TemplateBinding BorderBrush}' BorderThickness='1' CornerRadius='12'
+    MinWidth='{Binding ActualWidth, ElementName=comboRoot}' MaxHeight='300' Padding='6'>
+    <ScrollViewer CanContentScroll='True' PanningMode='VerticalOnly'><ItemsPresenter/></ScrollViewer>
+   </Border>
+  </Popup>
+ </Grid>
+</ControlTemplate>");
+            return _comboTemplate;
+        }
+
+        public static Style ScrollbarStyle()
+        {
+            Style style = new Style(typeof(System.Windows.Controls.Primitives.ScrollBar));
+            style.Setters.Add(new Setter(Control.BackgroundProperty, SurfaceLow));
+            style.Setters.Add(new Setter(Control.ForegroundProperty, Line));
+            style.Setters.Add(new Setter(FrameworkElement.WidthProperty, 10.0));
+            style.Setters.Add(new Setter(Control.TemplateProperty, (ControlTemplate)XamlReader.Parse(@"
+<ControlTemplate TargetType='ScrollBar' xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'
+ xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml'>
+ <Border Background='{TemplateBinding Background}' CornerRadius='5' Margin='2,0'>
+  <Track x:Name='PART_Track' IsDirectionReversed='True' Orientation='Vertical'>
+   <Track.DecreaseRepeatButton><RepeatButton Command='ScrollBar.PageUpCommand' Focusable='False'>
+    <RepeatButton.Template><ControlTemplate TargetType='RepeatButton'><Border Background='Transparent'/></ControlTemplate></RepeatButton.Template>
+   </RepeatButton></Track.DecreaseRepeatButton>
+   <Track.Thumb><Thumb Background='{TemplateBinding Foreground}'>
+    <Thumb.Template><ControlTemplate TargetType='Thumb'><Border Background='{TemplateBinding Background}' CornerRadius='4'/></ControlTemplate></Thumb.Template>
+   </Thumb></Track.Thumb>
+   <Track.IncreaseRepeatButton><RepeatButton Command='ScrollBar.PageDownCommand' Focusable='False'>
+    <RepeatButton.Template><ControlTemplate TargetType='RepeatButton'><Border Background='Transparent'/></ControlTemplate></RepeatButton.Template>
+   </RepeatButton></Track.IncreaseRepeatButton>
+  </Track>
+ </Border>
+</ControlTemplate>")));
+            return style;
+        }
+
         public static Button Btn(string text, double fontSize, Brush bg, Brush fg,
             RoutedEventHandler click)
         {

@@ -22,6 +22,17 @@ internal static class LayoutSmoke
         ControllerWindow window = new ControllerWindow(config);
         Grid root = (Grid)window.Content;
         root.Background = Ui.BgGradient();
+        // CI has no speakers/backlight/projector. Show their controls for
+        // layout checks without invoking hardware actions.
+        foreach (string field in new string[] { "_volSlider", "_briSlider", "_projectorBriSlider" })
+        {
+            TouchSlider slider = (TouchSlider)typeof(ControllerWindow).GetField(field,
+                BindingFlags.NonPublic | BindingFlags.Instance).GetValue(window);
+            FrameworkElement row = (FrameworkElement)slider.Parent;
+            if (field == "_volSlider") row = (FrameworkElement)row.Parent;
+            row.Visibility = Visibility.Visible;
+            slider.Value = field == "_volSlider" ? 35 : 60;
+        }
         typeof(ControllerWindow).GetMethod("RebuildTiles", BindingFlags.NonPublic | BindingFlags.Instance)
             .Invoke(window, null);
         typeof(ControllerWindow).GetMethod("TickClock", BindingFlags.NonPublic | BindingFlags.Instance).Invoke(window, null);
@@ -58,8 +69,8 @@ internal static class LayoutSmoke
     private static void SaveImage(FrameworkElement root, string name)
     {
         Directory.CreateDirectory(".visual-check");
-        RenderTargetBitmap bitmap = new RenderTargetBitmap((int)Math.Ceiling(root.ActualWidth),
-            (int)Math.Ceiling(root.ActualHeight), 96, 96, PixelFormats.Pbgra32);
+        RenderTargetBitmap bitmap = new RenderTargetBitmap((int)Math.Ceiling(root.ActualWidth + root.Margin.Left + root.Margin.Right),
+            (int)Math.Ceiling(root.ActualHeight + root.Margin.Top + root.Margin.Bottom), 96, 96, PixelFormats.Pbgra32);
         bitmap.Render(root);
         PngBitmapEncoder encoder = new PngBitmapEncoder();
         encoder.Frames.Add(BitmapFrame.Create(bitmap));

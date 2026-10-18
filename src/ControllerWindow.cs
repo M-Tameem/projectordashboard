@@ -377,6 +377,7 @@ namespace ProjectorDash
 
         private UIElement BuildLayout()
         {
+            Resources[typeof(ScrollBar)] = Ui.ScrollbarStyle();
             Grid root = new Grid { Margin = new Thickness(22), UseLayoutRounding = true };
             root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
@@ -2844,17 +2845,16 @@ namespace ProjectorDash
             combo.MinHeight = 52;
             combo.FontSize = 17;
             combo.FontFamily = new FontFamily(Ui.FontUi);
-            // The stock Windows ComboBox chrome paints its closed face white on
-            // some tablet themes, so use an explicit dark foreground here.
-            combo.Background = Brushes.White;
-            combo.Foreground = Ui.ComboText;
+            combo.Template = Ui.ComboTemplate();
+            combo.Background = Ui.PanelHi;
+            combo.Foreground = Ui.Text;
             combo.BorderBrush = Ui.Line;
             combo.Padding = new Thickness(10, 6, 10, 6);
             Style items = new Style(typeof(ComboBoxItem));
             items.Setters.Add(new Setter(ComboBoxItem.MinHeightProperty, 46.0));
             items.Setters.Add(new Setter(ComboBoxItem.PaddingProperty, new Thickness(10, 7, 10, 7)));
-            items.Setters.Add(new Setter(ComboBoxItem.BackgroundProperty, Brushes.White));
-            items.Setters.Add(new Setter(ComboBoxItem.ForegroundProperty, Ui.ComboText));
+            items.Setters.Add(new Setter(ComboBoxItem.BackgroundProperty, Ui.PanelHi));
+            items.Setters.Add(new Setter(ComboBoxItem.ForegroundProperty, Ui.Text));
             combo.ItemContainerStyle = items;
             return combo;
         }
