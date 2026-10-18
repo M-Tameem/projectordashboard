@@ -83,6 +83,8 @@ No TouchMousePointer or other mouse utility is required. Close any old mouse ove
 - Tap **Drag**, then slide with one finger. Lifting releases the mouse button; drag mode resets after that gesture.
 - **Keyboard** opens Windows' movable on-screen keyboard.
 
+Dashboard controls, including the remote, stay on the tablet and are excluded from projector app discovery. Known executable launches only track their own process or process name; opening the keyboard or remote during launch cannot redirect them onto the projector. Pointer movement does not require switching foreground focus.
+
 The same trackpad is available under **Remote > Trackpad** during fullscreen projector preview. In **Tablet only** mode, return to the app and use direct touch; the playback remote remains available. A virtual mouse on the same display would otherwise hit its own floating controls.
 
 Input goes through Windows' native `SendInput` API to the existing app. Coordinates include the full virtual desktop, including a projector positioned left of or above the tablet, and movement stays within the selected display. A drag is released when a touch is cancelled, the pad is hidden/unloaded, or the Windows session/display configuration changes. Like ordinary Windows input automation, it cannot control a program running at a higher privilege level.
@@ -165,6 +167,6 @@ Do not manually rename a different program to `Dashboard.exe`: the updater requi
 
 ## Development checks
 
-`powershell -ExecutionPolicy Bypass -File tests\run-windows.ps1` builds the x86 app using Windows’ bundled compiler, runs the gesture/coordinate and rollback checks, and measures the real WPF dashboard and remote templates at common tablet sizes. The validation workflow runs these checks for pushes and pull requests. The input tests also run on macOS/Linux with `dotnet run --project tests/InputTests.csproj` (the .NET 8 SDK is a development dependency only).
+`powershell -ExecutionPolicy Bypass -File tests\run-windows.ps1` builds the x86 app using Windows’ bundled compiler, runs the gesture/coordinate and rollback checks, exercises window selection and native pointer delivery to a separate test app using simulated WPF touch contacts, and measures the real WPF dashboard and remote templates at common tablet sizes. The validation workflow runs these checks for pushes and pull requests. The input tests also run on macOS/Linux with `dotnet run --project tests/InputTests.csproj` (the .NET 8 SDK is a development dependency only).
 
 Before using a new build on the tablet, check one- and two-finger gestures, double-click, right-click, drag cancellation, fullscreen preview, and reconnecting the projector. Also check volume/output selection, both brightness sliders, keyboard placement, alarm dismissal/snooze, and returning from tablet-only playback. Compilation and layout measurements do not replace physical touchscreen, audio, and display testing on Windows 8.1.

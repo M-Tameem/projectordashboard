@@ -169,6 +169,7 @@ namespace ProjectorDash
         private const uint KEYEVENTF_KEYUP = 0x0002;
         private static readonly IntPtr HwndBroadcast = new IntPtr(0xFFFF);
         private static readonly IntPtr HwndTopmost = new IntPtr(-1);
+        private static readonly int DashboardProcessId = Process.GetCurrentProcess().Id;
         private const string ShortcutProperty = "ProjectorDash.Shortcut";
 
         public static int ScreenCount()
@@ -282,7 +283,8 @@ namespace ProjectorDash
         /// <summary>
         /// Finds the best top-level window belonging to a launch. New windows
         /// are preferred; process id/name matching handles normal executables,
-        /// while allowAnyNew handles ShellExecute and Chromium process reuse.
+        /// while process-name matching handles Chromium process reuse. Only
+        /// unknown document handlers may fall back to an unrelated new process.
         /// </summary>
         public static IntPtr FindLaunchWindow(HashSet<IntPtr> before,
             int launchedProcessId, string expectedExePath,
@@ -304,12 +306,14 @@ namespace ProjectorDash
                 bool isNew = before == null || !before.Contains(hwnd);
                 bool matches = WindowMatchesProcess(hwnd, launchedProcessId, expectedName);
                 if (isNew && matches) return hwnd;
-                if (isNew && firstNew == IntPtr.Zero) firstNew = hwnd;
+                if (isNew && firstNew == IntPtr.Zero && !IsKeyboardWindow(hwnd)) firstNew = hwnd;
                 if (matches && firstMatch == IntPtr.Zero) firstMatch = hwnd;
             }
 
-            if (allowAnyNew && firstNew != IntPtr.Zero) return firstNew;
-            if (allowExistingMatch) return firstMatch;
+            if (allowExistingMatch && firstMatch != IntPtr.Zero) return firstMatch;
+            bool knownExecutable = string.Equals(System.IO.Path.GetExtension(expectedExePath ?? ""),
+                ".exe", StringComparison.OrdinalIgnoreCase);
+            if (allowAnyNew && !knownExecutable && firstNew != IntPtr.Zero) return firstNew;
             return IntPtr.Zero;
         }
 
@@ -319,7 +323,7 @@ namespace ProjectorDash
         /// </summary>
         public static void PlaceExternalWindow(IntPtr hwnd, Screen screen, bool fullscreen)
         {
-            if (hwnd == IntPtr.Zero || screen == null || !IsWindow(hwnd)) return;
+            if (screen == null || !IsExternalAppWindow(hwnd)) return;
 
             System.Drawing.Rectangle bounds = fullscreen ? screen.Bounds : screen.WorkingArea;
 
@@ -358,7 +362,7 @@ namespace ProjectorDash
         public static bool BringAppWindowToFront(IntPtr hwnd, Screen screen,
             bool fullscreen)
         {
-            if (hwnd == IntPtr.Zero || screen == null || !IsWindow(hwnd)) return false;
+            if (screen == null || !IsExternalAppWindow(hwnd)) return false;
             ShowWindow(hwnd, SW_RESTORE);
             PlaceExternalWindow(hwnd, screen, fullscreen);
             BringWindowToTop(hwnd);
@@ -367,7 +371,7 @@ namespace ProjectorDash
 
         public static void TagShortcutWindow(IntPtr hwnd, int shortcutToken)
         {
-            if (hwnd == IntPtr.Zero || shortcutToken == 0 || !IsWindow(hwnd)) return;
+            if (shortcutToken == 0 || !IsExternalAppWindow(hwnd)) return;
             SetProp(hwnd, ShortcutProperty, new IntPtr(shortcutToken));
         }
 
@@ -377,7 +381,7 @@ namespace ProjectorDash
             IntPtr found = IntPtr.Zero;
             EnumWindows(delegate(IntPtr hwnd, IntPtr unused)
             {
-                if (GetProp(hwnd, ShortcutProperty).ToInt64() == shortcutToken)
+                if (IsExternalAppWindow(hwnd) && GetProp(hwnd, ShortcutProperty).ToInt64() == shortcutToken)
                 {
                     found = hwnd;
                     return false;
@@ -396,7 +400,7 @@ namespace ProjectorDash
         /// <summary>Focus without restoring/resizing the app on every gesture.</summary>
         public static bool FocusInputWindow(IntPtr hwnd)
         {
-            if (hwnd == IntPtr.Zero || !IsWindow(hwnd)) return false;
+            if (!IsExternalAppWindow(hwnd)) return false;
             if (GetForegroundWindow() == hwnd) return true;
             BringWindowToTop(hwnd);
             return SetForegroundWindow(hwnd);
@@ -427,10 +431,9 @@ namespace ProjectorDash
         /// <summary>Sends one ordinary virtual key to the selected app.</summary>
         public static bool SendVirtualKey(IntPtr hwnd, int virtualKey)
         {
-            if (hwnd == IntPtr.Zero || !IsWindow(hwnd) ||
+            if (!IsExternalAppWindow(hwnd) ||
                 virtualKey < 1 || virtualKey > 255) return false;
-            BringWindowToTop(hwnd);
-            SetForegroundWindow(hwnd);
+            if (!FocusInputWindow(hwnd)) return false;
             // The remote click temporarily owns foreground input. A tiny wait
             // gives Windows time to return focus to the selected app before
             // emitting the key pair.
@@ -511,14 +514,14 @@ namespace ProjectorDash
                 uint pid;
                 GetWindowThreadProcessId(hwnd, out pid);
                 if ((int)pid == excludedProcessId) continue;
-                if (WindowIsOnScreen(hwnd, screen)) return hwnd;
+                if (!IsKeyboardWindow(hwnd) && WindowIsOnScreen(hwnd, screen)) return hwnd;
             }
             return IntPtr.Zero;
         }
 
         public static bool RequestCloseWindow(IntPtr hwnd)
         {
-            if (hwnd == IntPtr.Zero || !IsWindow(hwnd)) return false;
+            if (!IsExternalAppWindow(hwnd)) return false;
             return PostMessage(hwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
         }
 
@@ -557,7 +560,7 @@ namespace ProjectorDash
                 uint pid;
                 GetWindowThreadProcessId(hwnd, out pid);
                 if ((int)pid == excludedProcessId) continue;
-                if (!WindowIsOnScreen(hwnd, screen)) continue;
+                if (IsKeyboardWindow(hwnd) || !WindowIsOnScreen(hwnd, screen)) continue;
                 if (ShowWindow(hwnd, SW_HIDE)) hidden.Add(hwnd);
             }
             return hidden;
@@ -572,7 +575,7 @@ namespace ProjectorDash
             for (int i = windows.Count - 1; i >= 0; i--)
             {
                 IntPtr hwnd = windows[i];
-                if (!IsWindow(hwnd)) continue;
+                if (!IsExternalAppWindow(hwnd)) continue;
                 ShowWindow(hwnd, SW_SHOW);
                 if (screen != null) PlaceExternalWindow(hwnd, screen, fullscreen);
             }
@@ -589,9 +592,26 @@ namespace ProjectorDash
             return windows;
         }
 
+        // Never classify dashboard controls, dimmers, previews or dialogs as
+        // launched apps, even when a saved/late handle reaches a mutation path.
+        public static bool IsExternalAppWindow(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero || !IsWindow(hwnd)) return false;
+            uint pid;
+            return GetWindowThreadProcessId(hwnd, out pid) != 0 &&
+                pid != 0 && pid != (uint)DashboardProcessId;
+        }
+
+        private static bool IsKeyboardWindow(IntPtr hwnd)
+        {
+            StringBuilder cls = new StringBuilder(128);
+            GetClassName(hwnd, cls, cls.Capacity);
+            return cls.ToString() == "OSKMainClass" || cls.ToString() == "IPTip_Main_Window";
+        }
+
         private static bool IsSuitableAppWindow(IntPtr hwnd)
         {
-            if (!IsWindowVisible(hwnd)) return false;
+            if (!IsExternalAppWindow(hwnd) || !IsWindowVisible(hwnd)) return false;
             NativeRect rect;
             if (!GetWindowRect(hwnd, out rect)) return false;
             if (rect.Right - rect.Left < 160 || rect.Bottom - rect.Top < 100) return false;

@@ -98,7 +98,12 @@ namespace ProjectorDash
                 _y = PointerMath.Clamp(_y + dy * 2.0, _bounds.Top, _bounds.Height);
                 Send(0, 0);
             };
-            _gesture.Scroll = delegate(int amount) { Send(0x0800, amount); };
+            _gesture.Scroll = delegate(int amount)
+            {
+                // Windows 8.1 delivers the wheel to the foreground app.
+                if (ScreenUtil.FocusInputWindow(_window)) Send(0x0800, amount);
+                else _status.Text = "Tap the app tile before scrolling";
+            };
             _gesture.Tap = delegate { Click(false); };
             _gesture.Drag = delegate(bool down)
             {
@@ -145,7 +150,7 @@ namespace ProjectorDash
         {
             WinForms.Screen screen = _screen();
             _window = _target();
-            if (screen == null || _window == IntPtr.Zero || !ScreenUtil.IsWindow(_window))
+            if (screen == null || _window == IntPtr.Zero || !ScreenUtil.IsExternalAppWindow(_window))
             {
                 Cancel(); _status.Text = "Open an app to use the trackpad"; return false;
             }
@@ -156,10 +161,8 @@ namespace ProjectorDash
                 _x = _bounds.Left + _bounds.Width / 2.0;
                 _y = _bounds.Top + _bounds.Height / 2.0;
             }
-            if (!ScreenUtil.FocusInputWindow(_window))
-            {
-                Cancel(); _status.Text = "Tap the app tile to reconnect"; return false;
-            }
+            // Pointer movement/clicks target screen coordinates and need no
+            // foreground permission. Activating here can interrupt touch capture.
             _status.Text = "Connected · two fingers to scroll";
             return true;
         }
@@ -181,11 +184,12 @@ namespace ProjectorDash
         private void OnUp(object sender, TouchEventArgs e)
         {
             e.Handled = true;
-            _gesture.Up(e.TouchDevice.Id, _time.ElapsedMilliseconds);
-            // Normal release must not cancel a second finger's scroll gesture.
+            // Release touch capture before a tap injects a mouse click into
+            // another window. Keep a second finger's scroll gesture intact.
             _releasingCapture = true;
             e.TouchDevice.Capture(null);
             _releasingCapture = false;
+            _gesture.Up(e.TouchDevice.Id, _time.ElapsedMilliseconds);
             _drag.Background = Ui.PanelHi;
         }
         private void OnUnexpectedCaptureLoss(object sender, TouchEventArgs e)
@@ -193,7 +197,7 @@ namespace ProjectorDash
 
         private bool Send(uint flags, int data)
         {
-            if (_window == IntPtr.Zero || !ScreenUtil.IsWindow(_window) ||
+            if (_window == IntPtr.Zero || !ScreenUtil.IsExternalAppWindow(_window) ||
                 !ScreenUtil.InjectPointer(_x, _y, flags, data))
             {
                 ReleaseButton();

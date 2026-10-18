@@ -1256,10 +1256,10 @@ namespace ProjectorDash
             {
                 hwnd = ScreenUtil.FindTaggedShortcutWindow(
                     ShortcutWindowToken(item));
-                if (hwnd == IntPtr.Zero || !ScreenUtil.IsWindow(hwnd)) return false;
+                if (hwnd == IntPtr.Zero || !ScreenUtil.IsExternalAppWindow(hwnd)) return false;
                 _shortcutWindows[item] = hwnd;
             }
-            if (ScreenUtil.IsWindow(hwnd)) return true;
+            if (ScreenUtil.IsExternalAppWindow(hwnd)) return true;
             _shortcutWindows.Remove(item);
             return false;
         }
@@ -1284,7 +1284,7 @@ namespace ProjectorDash
 
         private void RegisterShortcutWindow(ShortcutItem item, IntPtr hwnd)
         {
-            if (item == null || hwnd == IntPtr.Zero || !ScreenUtil.IsWindow(hwnd)) return;
+            if (item == null || hwnd == IntPtr.Zero || !ScreenUtil.IsExternalAppWindow(hwnd)) return;
             IntPtr existing;
             if (_shortcutWindows.TryGetValue(item, out existing) && existing == hwnd) return;
             if (existing != IntPtr.Zero && existing != hwnd)
@@ -1300,7 +1300,7 @@ namespace ProjectorDash
             List<ShortcutItem> closed = new List<ShortcutItem>();
             foreach (KeyValuePair<ShortcutItem, IntPtr> pair in _shortcutWindows)
             {
-                if (!ScreenUtil.IsWindow(pair.Value)) closed.Add(pair.Key);
+                if (!ScreenUtil.IsExternalAppWindow(pair.Value)) closed.Add(pair.Key);
             }
             if (closed.Count == 0) return;
             foreach (ShortcutItem item in closed) _shortcutWindows.Remove(item);
@@ -1313,7 +1313,7 @@ namespace ProjectorDash
             IntPtr hwnd;
             if (!ShortcutIsActive(item) ||
                 !_shortcutWindows.TryGetValue(item, out hwnd)) return false;
-            if (!ScreenUtil.IsWindow(hwnd))
+            if (!ScreenUtil.IsExternalAppWindow(hwnd))
             {
                 _shortcutWindows.Remove(item);
                 RebuildTiles();
@@ -1878,6 +1878,9 @@ namespace ProjectorDash
                     delegate { if (_projectorSleeping) WakeProjector(); return CurrentRemoteTarget(); }, !_cfg.TabletOnlyMode);
             }
             if (!_remoteWindow.IsVisible) _remoteWindow.Show();
+            ScreenUtil.PlaceRemoteOverlay(_remoteWindow, tablet,
+                (int)(760 * ScreenUtil.DpiScale(_remoteWindow)),
+                (int)(520 * ScreenUtil.DpiScale(_remoteWindow)));
             _remoteWindow.Topmost = true;
             _remoteWindow.Activate();
         }
@@ -1886,7 +1889,7 @@ namespace ProjectorDash
         {
             WinForms.Screen target = GetProjectorScreen(false);
             if (target == null) return IntPtr.Zero;
-            if (ScreenUtil.IsWindow(_lastLaunchedWindow) &&
+            if (ScreenUtil.IsExternalAppWindow(_lastLaunchedWindow) &&
                 ScreenUtil.WindowIsOnScreen(_lastLaunchedWindow, target))
                 return _lastLaunchedWindow;
             return ScreenUtil.FindTopAppWindowOnScreen(target,
@@ -2170,7 +2173,8 @@ namespace ProjectorDash
                     _lastLaunchedWindow = tracked;
                     if (shortcut != null) RegisterShortcutWindow(shortcut, tracked);
                     ScreenUtil.PlaceExternalWindow(tracked, projector, _cfg.LaunchFullscreen);
-                    if (!_cfg.TabletOnlyMode) Activate();
+                    // Placement runs for several seconds after launch. Do not
+                    // steal input focus back from the trackpad's target app.
 
                     // Keep watching long enough to step past splash screens
                     // and Chromium's initial hand-off to its real window.
@@ -2191,7 +2195,7 @@ namespace ProjectorDash
             {
                 ticks++;
                 IntPtr hwnd = ScreenUtil.FindLaunchWindow(before, processId,
-                    "osk.exe", ticks > 3, true);
+                    "osk.exe", ticks > 3, false);
                 if (hwnd != IntPtr.Zero)
                 {
                     ScreenUtil.PlaceKeyboardWindow(hwnd, tablet,
