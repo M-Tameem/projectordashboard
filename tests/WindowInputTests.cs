@@ -17,6 +17,7 @@ using Forms = System.Windows.Forms;
 internal static class WindowInputTests
 {
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr hwnd, int command);
     [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr w, IntPtr l);
     private static int passed;
     private static void Check(bool ok, string message)
@@ -113,6 +114,15 @@ internal static class WindowInputTests
             Check(ScreenUtil.FindLaunchWindow(before, 0, "missing-browser.exe", true, true) == IntPtr.Zero, "Known executable launch cannot steal an unrelated new window");
             Check(ScreenUtil.FindLaunchWindow(before, 0, exe, true, true) == hwnd, "Browser process reuse prefers the existing matching app");
             Check(ScreenUtil.FindLaunchWindow(before, 0, "osk.exe", true, true) == IntPtr.Zero, "Keyboard placement cannot steal an unrelated new window");
+            List<ScreenUtil.BrowserWindow> browsers = ScreenUtil.FindBrowserWindows(exe);
+            Check(browsers.Count == 1 && browsers[0].Handle == hwnd,
+                "Browser discovery finds an existing configured app and excludes own/unrelated windows");
+            Check(browsers[0].Title == "External input fixture" && string.Equals(browsers[0].ExecutablePath, exe, StringComparison.OrdinalIgnoreCase),
+                "Discovered browser includes its actual title and executable path");
+            ShowWindow(hwnd, 6); Pump();
+            browsers = ScreenUtil.FindBrowserWindows(exe);
+            Check(browsers.Count == 1 && browsers[0].Handle == hwnd, "Minimized browser windows remain discoverable");
+            Check(ScreenUtil.FindBrowserWindows(copy).Count == 1, "Browser discovery respects a different configured executable");
             unrelated.Kill(); unrelated.WaitForExit(); unrelated.Dispose(); unrelated = null;
             own.Close(); own = null;
             ScreenUtil.PlaceExternalWindow(hwnd, Forms.Screen.PrimaryScreen, true);
@@ -142,10 +152,18 @@ internal static class WindowInputTests
             finger = new Contact(3, surface); finger.Down(70, 40); finger.Move(80, 45); pad.Cancel(); Pump();
             Check(Count(hwnd, 1) == 2 && Count(hwnd, 4) == 2, "Cancelling a drag releases the actual mouse button");
             finger.Up();
-            // Wheel delivery uses Windows foreground routing, as on Windows 8.1.
-            Check(ScreenUtil.FocusInputWindow(hwnd), "External fixture accepts foreground input");
-            gesture.Scroll(120); Pump();
-            Check(Count(hwnd, 3) == 1, "Native wheel input reaches the external app");
+            // Start in the dashboard, then scroll through actual routed contacts.
+            padWindow.Activate(); Pump();
+            finger = new Contact(4, surface);
+            Contact second = new Contact(5, surface);
+            finger.Down(70, 40); second.Down(90, 40);
+            finger.Move(70, 76); Pump();
+            Check(Count(hwnd, 3) == 1 && gesture.ContactCount == 2,
+                "Two-finger touch delivers a native wheel event without losing contacts");
+            second.Move(90, 76); Pump();
+            Check(Count(hwnd, 3) == 2, "Scrolling continues after focus moves to the app");
+            second.Up(); finger.Up(); Pump();
+            Check(Count(hwnd, 1) == 2, "Lifting scroll fingers does not click the app");
             Console.WriteLine("Window/input integration: " + passed + " checks passed");
             return 0;
         }

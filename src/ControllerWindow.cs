@@ -69,6 +69,8 @@ namespace ProjectorDash
         private TextBlock _dateText;
         private TextBlock _alarmStatusText;
         private WrapPanel _tilePanel;
+        private List<ScreenUtil.BrowserWindow> _browserWindows = new List<ScreenUtil.BrowserWindow>();
+        private DateTime _nextBrowserScanUtc;
         private TouchSlider _volSlider;
         private Button _muteBtn;
         private Button _audioDeviceBtn;
@@ -301,6 +303,11 @@ namespace ProjectorDash
             CheckAlarm(now);
             CheckAutoLock(now);
             RefreshShortcutStates();
+            if (utc >= _nextBrowserScanUtc && !_projectorSleeping)
+            {
+                _nextBrowserScanUtc = utc.AddSeconds(5);
+                RefreshBrowserWindows();
+            }
             CheckAutomaticKeyboard();
             _audioRefreshCounter++;
             if (_audioRefreshCounter >= 5 &&
@@ -1242,11 +1249,50 @@ namespace ProjectorDash
                 }
             }
 
+            foreach (ScreenUtil.BrowserWindow browser in _browserWindows)
+            {
+                if (_shortcutWindows.ContainsValue(browser.Handle)) continue;
+                ScreenUtil.BrowserWindow existing = browser;
+                Button resume = Ui.Tile(existing.Title, "Already open · resume Supermium", delegate
+                {
+                    if (!ScreenUtil.IsExternalAppWindow(existing.Handle)) { RefreshBrowserWindows(); return; }
+                    if (_projectorSleeping) WakeProjector();
+                    WinForms.Screen screen = GetProjectorScreen(true);
+                    if (screen == null) return;
+                    _launchGeneration++;
+                    _lastLaunchedWindow = existing.Handle;
+                    ScreenUtil.BringAppWindowToFront(existing.Handle, screen, _cfg.LaunchFullscreen);
+                    if (_cfg.TabletOnlyMode) EnterTabletAppMode();
+                });
+                resume.Background = Ui.AccentDim;
+                resume.BorderBrush = Ui.Accent;
+                resume.ToolTip = existing.Title + "\nResume this existing browser window without opening a new tab.";
+                _tilePanel.Children.Add(resume);
+            }
+
             Button add = Ui.Tile("Add shortcut", "Make yourself at home", delegate { OpenSettings(0); });
             add.Background = Ui.SurfaceLow;
             add.BorderBrush = Ui.Line;
             _tilePanel.Children.Add(add);
             FitTiles();
+        }
+
+        private void RefreshBrowserWindows()
+        {
+            List<ScreenUtil.BrowserWindow> found = ScreenUtil.FindBrowserWindows(_cfg.BrowserPath);
+            if ((!File.Exists(_cfg.BrowserPath)) && found.Count > 0)
+            {
+                _cfg.BrowserPath = found[0].ExecutablePath;
+                _cfg.Save();
+                if (_editBrowser != null) _editBrowser.Text = _cfg.BrowserPath;
+            }
+            bool changed = found.Count != _browserWindows.Count;
+            if (!changed)
+                for (int i = 0; i < found.Count; i++)
+                    if (found[i].Handle != _browserWindows[i].Handle || found[i].Title != _browserWindows[i].Title)
+                    { changed = true; break; }
+            _browserWindows = found;
+            if (changed) RebuildTiles();
         }
 
         private bool ShortcutIsActive(ShortcutItem item)

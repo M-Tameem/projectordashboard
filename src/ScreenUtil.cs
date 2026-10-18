@@ -32,6 +32,19 @@ namespace ProjectorDash
         [DllImport("user32.dll")]
         private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
 
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr OpenProcess(uint access, bool inherit, uint processId);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool QueryFullProcessImageName(IntPtr process, uint flags,
+            StringBuilder path, ref int size);
+
+        [DllImport("kernel32.dll")]
+        private static extern bool CloseHandle(IntPtr handle);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int capacity);
+
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         private static extern int GetClassName(IntPtr hWnd, StringBuilder className, int maxCount);
 
@@ -46,6 +59,9 @@ namespace ProjectorDash
 
         [DllImport("user32.dll")]
         private static extern bool IsZoomed(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern bool IsIconic(IntPtr hWnd);
 
         [DllImport("user32.dll")]
         private static extern bool PostMessage(IntPtr hWnd, uint message,
@@ -581,15 +597,98 @@ namespace ProjectorDash
             }
         }
 
-        private static List<IntPtr> EnumerateSuitableWindows()
+        private static List<IntPtr> EnumerateSuitableWindows(bool includeMinimized = false)
         {
             List<IntPtr> windows = new List<IntPtr>();
             EnumWindows(delegate(IntPtr hwnd, IntPtr unused)
             {
-                if (IsSuitableAppWindow(hwnd)) windows.Add(hwnd);
+                if (IsSuitableAppWindow(hwnd, includeMinimized)) windows.Add(hwnd);
                 return true;
             }, IntPtr.Zero);
             return windows;
+        }
+
+        public sealed class BrowserWindow
+        {
+            public IntPtr Handle;
+            public string Title;
+            public string ExecutablePath;
+        }
+
+        private static string ProcessPath(uint processId)
+        {
+            // Limited query access works across x86/x64 without reading modules.
+            IntPtr process = OpenProcess(0x1000, false, processId);
+            if (process == IntPtr.Zero) return "";
+            try
+            {
+                StringBuilder path = new StringBuilder(32768);
+                int length = path.Capacity;
+                return QueryFullProcessImageName(process, 0, path, ref length) ? path.ToString() : "";
+            }
+            finally { CloseHandle(process); }
+        }
+
+        private static bool IsSupermiumExecutable(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return false;
+            try
+            {
+                string file = System.IO.Path.GetFileName(path);
+                if (string.Equals(file, "supermium.exe", StringComparison.OrdinalIgnoreCase)) return true;
+                if (!string.Equals(file, "chrome.exe", StringComparison.OrdinalIgnoreCase)) return false;
+                FileVersionInfo version = FileVersionInfo.GetVersionInfo(path);
+                string brand = (version.ProductName ?? "") + " " + (version.FileDescription ?? "");
+                return brand.IndexOf("Supermium", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    string.Equals(System.IO.Path.GetFileName(System.IO.Path.GetDirectoryName(path)),
+                        "Supermium", StringComparison.OrdinalIgnoreCase);
+            }
+            catch { return false; }
+        }
+
+        public static string DetectRunningSupermium()
+        {
+            foreach (string name in new string[] { "supermium", "chrome" })
+            {
+                foreach (Process process in Process.GetProcessesByName(name))
+                {
+                    using (process)
+                    {
+                        string path = ProcessPath((uint)process.Id);
+                        if (IsSupermiumExecutable(path)) return path;
+                    }
+                }
+            }
+            return "";
+        }
+
+        public static List<BrowserWindow> FindBrowserWindows(string configuredPath)
+        {
+            List<BrowserWindow> result = new List<BrowserWindow>();
+            Dictionary<uint, string> paths = new Dictionary<uint, string>();
+            Dictionary<string, bool> matches = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+            foreach (IntPtr hwnd in EnumerateSuitableWindows(true))
+            {
+                uint pid;
+                GetWindowThreadProcessId(hwnd, out pid);
+                string path;
+                if (!paths.TryGetValue(pid, out path)) paths[pid] = path = ProcessPath(pid);
+                if (path.Length == 0) continue;
+                bool match;
+                if (!matches.TryGetValue(path, out match))
+                {
+                    match = string.Equals(path, configuredPath, StringComparison.OrdinalIgnoreCase) ||
+                        IsSupermiumExecutable(path);
+                    matches[path] = match;
+                }
+                if (!match) continue;
+                StringBuilder title = new StringBuilder(512);
+                GetWindowText(hwnd, title, title.Capacity);
+                result.Add(new BrowserWindow { Handle = hwnd,
+                    Title = title.Length == 0 ? "Supermium" : title.ToString(), ExecutablePath = path });
+            }
+            result.Sort(delegate(BrowserWindow a, BrowserWindow b) { return a.Handle.ToInt64().CompareTo(b.Handle.ToInt64()); });
+            return result;
         }
 
         // Never classify dashboard controls, dimmers, previews or dialogs as
@@ -609,12 +708,13 @@ namespace ProjectorDash
             return cls.ToString() == "OSKMainClass" || cls.ToString() == "IPTip_Main_Window";
         }
 
-        private static bool IsSuitableAppWindow(IntPtr hwnd)
+        private static bool IsSuitableAppWindow(IntPtr hwnd, bool includeMinimized)
         {
             if (!IsExternalAppWindow(hwnd) || !IsWindowVisible(hwnd)) return false;
             NativeRect rect;
             if (!GetWindowRect(hwnd, out rect)) return false;
-            if (rect.Right - rect.Left < 160 || rect.Bottom - rect.Top < 100) return false;
+            if (!(includeMinimized && IsIconic(hwnd)) &&
+                (rect.Right - rect.Left < 160 || rect.Bottom - rect.Top < 100)) return false;
 
             StringBuilder cls = new StringBuilder(128);
             GetClassName(hwnd, cls, cls.Capacity);

@@ -124,9 +124,11 @@ namespace ProjectorDash
         // monitor targeting and fullscreen behaviour stay deterministic.
         public string BrowserPath = "";
 
-        // Probes the usual Supermium install locations.
+        // Also finds an already-running portable copy outside the usual folders.
         public static string DetectSupermium()
         {
+            string running = ScreenUtil.DetectRunningSupermium();
+            if (!string.IsNullOrEmpty(running)) return running;
             string[] roots = new string[]
             {
                 Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
@@ -228,7 +230,7 @@ namespace ProjectorDash
                         cfg.ProjectorBrightnessPercent = projectorBrightness;
                         changed = true;
                     }
-                    if (string.IsNullOrEmpty(cfg.BrowserPath))
+                    if (string.IsNullOrEmpty(cfg.BrowserPath) || !File.Exists(cfg.BrowserPath))
                     {
                         cfg.BrowserPath = DetectSupermium();
                         if (!string.IsNullOrEmpty(cfg.BrowserPath)) changed = true;
