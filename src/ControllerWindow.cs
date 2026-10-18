@@ -452,7 +452,22 @@ namespace ProjectorDash
             power.Margin = new Thickness(0);
             actions.Children.Add(power);
             _powerPopup = BuildPowerPopup(power);
-            Grid.SetColumn(actions, 2); header.Children.Add(actions);
+            StackPanel mainActions = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+            mainActions.Children.Add(actions);
+            Grid quickActions = new Grid { Margin = new Thickness(0, 8, 0, 0) };
+            quickActions.ColumnDefinitions.Add(new ColumnDefinition());
+            quickActions.ColumnDefinitions.Add(new ColumnDefinition());
+            Button memory = Ui.Btn("Memory + CPU", 14, Ui.Panel, Ui.Text, delegate { OpenSettings(5); });
+            memory.Padding = new Thickness(10, 8, 10, 8);
+            memory.Margin = new Thickness(0, 0, 8, 0);
+            quickActions.Children.Add(memory);
+            Button emergency = Ui.Btn("Emergency off", 14, Ui.DangerFill, Ui.DangerText, delegate { EmergencyOff(); });
+            emergency.Padding = new Thickness(10, 8, 10, 8);
+            emergency.BorderBrush = Ui.Danger;
+            emergency.ToolTip = "Immediately stop Supermium, lock Windows and turn off the displays.";
+            Grid.SetColumn(emergency, 1); quickActions.Children.Add(emergency);
+            mainActions.Children.Add(quickActions);
+            Grid.SetColumn(mainActions, 2); header.Children.Add(mainActions);
             Grid.SetColumnSpan(header, 2); root.Children.Add(header);
 
             Grid launchArea = new Grid { Margin = new Thickness(0, 0, 18, 14) };
@@ -2025,6 +2040,7 @@ namespace ProjectorDash
 
         private void EmergencyOff()
         {
+            if (_trackpad != null) _trackpad.Cancel();
             _launchGeneration++;
             if (_alarmSoundTimer != null) _alarmSoundTimer.Stop();
             if (_alarmAudioState != null)
@@ -2498,15 +2514,16 @@ namespace ProjectorDash
             WrapPanel tabs = new WrapPanel();
             tabs.Orientation = Orientation.Horizontal;
             tabs.Margin = new Thickness(0, 6, 0, 4);
-            string[] names = new string[] { "Shortcuts", "Projector", "Audio + browser", "Alarm", "Ambient" };
+            string[] names = new string[] { "Shortcuts", "Projector", "Audio + browser", "Alarm", "Ambient", "Memory + CPU" };
             _settingsTabButtons = new Button[names.Length];
             for (int i = 0; i < names.Length; i++)
             {
                 int index = i;
                 Button tab = Ui.Btn(names[i], 16, Ui.Panel, Ui.Text,
                     delegate { SelectSettingsPage(index); });
-                tab.MinWidth = 165;
-                tab.Margin = new Thickness(0, 0, 8, 0);
+                tab.MinWidth = 125;
+                tab.Padding = new Thickness(12, 8, 12, 8);
+                tab.Margin = new Thickness(0, 0, 8, 6);
                 _settingsTabButtons[i] = tab;
                 tabs.Children.Add(tab);
             }
@@ -2520,7 +2537,8 @@ namespace ProjectorDash
                 BuildProjectorSettingsPage(),
                 BuildAudioSettingsPage(),
                 BuildAlarmSettingsPage(),
-                BuildAmbientSettingsPage()
+                BuildAmbientSettingsPage(),
+                new ResourcePanel(delegate { return _cfg.BrowserPath; })
             };
             foreach (Grid page in _settingsPages)
             {

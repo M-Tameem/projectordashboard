@@ -9,7 +9,7 @@ try {
         "/r:$framework\System.Xaml.dll", "/r:$framework\System.Windows.Forms.dll",
         "/r:$framework\System.Drawing.dll", "/r:$framework\WPF\WindowsBase.dll",
         "/r:$framework\WPF\PresentationCore.dll", "/r:$framework\WPF\PresentationFramework.dll")
-    foreach ($test in @('InputTests', 'LayoutSmoke', 'WindowInputTests')) {
+    foreach ($test in @('InputTests', 'LayoutSmoke', 'WindowInputTests', 'ResourceTests')) {
         & $compiler /nologo /target:exe /platform:x86 "/out:$test.exe" @references "tests\$test.cs"
         if ($LASTEXITCODE -ne 0) { throw "$test compilation failed" }
         & ".\$test.exe"
@@ -25,6 +25,6 @@ try {
     & ".\$rollbackFolder\RollbackTests.exe"
     if ($LASTEXITCODE -ne 0) { throw 'Rollback checks failed' }
 } finally {
-    Remove-Item InputTests.exe, LayoutSmoke.exe, WindowInputTests.exe -ErrorAction SilentlyContinue
+    Remove-Item InputTests.exe, LayoutSmoke.exe, WindowInputTests.exe, ResourceTests.exe -ErrorAction SilentlyContinue
     Pop-Location
 }

@@ -619,7 +619,7 @@ namespace ProjectorDash
             public string ExecutablePath;
         }
 
-        private static string ProcessPath(uint processId)
+        internal static string ProcessPath(uint processId)
         {
             // Limited query access works across x86/x64 without reading modules.
             IntPtr process = OpenProcess(0x1000, false, processId);
@@ -633,7 +633,7 @@ namespace ProjectorDash
             finally { CloseHandle(process); }
         }
 
-        private static bool IsSupermiumExecutable(string path)
+        internal static bool IsSupermiumExecutable(string path)
         {
             if (string.IsNullOrEmpty(path)) return false;
             try

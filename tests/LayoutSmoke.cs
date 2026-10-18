@@ -47,9 +47,18 @@ internal static class LayoutSmoke
         }
         MethodInfo openSettings = typeof(ControllerWindow).GetMethod("OpenSettings",
             BindingFlags.NonPublic | BindingFlags.Instance, null, new Type[] { typeof(int) }, null);
-        foreach (int page in new int[] { 1, 2 })
+        foreach (int page in new int[] { 1, 2, 5 })
         {
             openSettings.Invoke(window, new object[] { page });
+            if (page == 5)
+            {
+                Grid[] pages = (Grid[])typeof(ControllerWindow).GetField("_settingsPages", BindingFlags.NonPublic | BindingFlags.Instance).GetValue(window);
+                ResourceSnapshot sample = new ResourceSnapshot { RamTotal = 2147483648UL, RamAvailable = 134217728,
+                    CommitUsed = 3800000000, CommitLimit = 4000000000, CommitPeak = 3900000000, CpuPercent = 78, Captured = DateTime.Now };
+                for (int i = 0; i < 25; i++) sample.Processes.Add(new ProcessUsage { Id = 100 + i, Name = "Supermium · chrome", Browser = true,
+                    RamBytes = 120000000, PrivateBytes = 160000000, CpuPercent = i == 0 ? 35 : 1.2 });
+                ((ResourcePanel)pages[5]).ShowSnapshot(sample);
+            }
             root.Measure(new Size(1366, 768)); root.Arrange(new Rect(0, 0, 1366, 768)); root.UpdateLayout();
             CheckControls(root, root, false);
             SaveImage(root, "settings-" + page);

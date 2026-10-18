@@ -2,7 +2,7 @@
 
 A bedside control panel for an ASUS Transformer Book T100TAF (2 GB RAM, Atom Z3735F) permanently wired to a projector. The tablet screen becomes the remote control; the projector stays clean. It is a native WPF application compiled with the C# compiler that is already part of Windows 8.1, so there is nothing to install — no Electron, no browser runtime, no frameworks, no internet needed to build.
 
-Typical footprint: roughly 30–45 MB of RAM, near-zero CPU when idle (one clock tick per second), and it starts in about two seconds on the Atom.
+The dashboard uses an existing one-second clock timer and event-driven controls. Memory and CPU sampling runs only while its task-manager page is visible; use **Memory + CPU** on the main screen to check actual usage on the tablet.
 
 ## Why this stack
 
@@ -42,7 +42,7 @@ The bedside layout keeps shortcuts on the left, playback and the built-in trackp
 - **Reset now** under Settings > Audio + browser force-closes every running Supermium process and opens a clean projector window. It is the fix-it control for a stuck browser, not the normal website launcher.
 - The movable Windows on-screen keyboard now opens automatically when a dashboard text box receives focus or when Windows reports a text caret in the foreground app on the active screen. It is placed beside the built-in trackpad. The Remote and **More > Keyboard** buttons remain one-tap fallbacks, and the Windows touch keyboard is used if OSK cannot start. **More > Windows desktop** minimizes the dashboard when you genuinely need Windows; tap it in the taskbar to come back.
 - **More > Daily tablet auto-lock** uses the same no-typing Hour, 5 Minute, and AM/PM controls. At the enabled time it locks the tablet exactly like Win+L. Windows still requires the normal sign-in to unlock; the dashboard does not store or bypass a password.
-- **Power** keeps the destructive actions out of the main toolbar. It can close the current projected app, turn off Windows display signals, lock plus emergency-off, exit the dashboard, or send physical projector standby through HDMI-CEC when compatible hardware is detected.
+- **Emergency off** is directly on the main screen: one tap stops Supermium, locks Windows, and turns off the displays. **Power** contains the other power and exit actions. It can close the current projected app, turn off Windows display signals, lock plus emergency-off, exit the dashboard, or send physical projector standby through HDMI-CEC when compatible hardware is detected.
 - Normal PC HDMI output can blank the signal but usually cannot originate HDMI-CEC commands. Physical projector standby requires both a CEC-capable projector and a CEC-capable source; on this tablet that will commonly mean a USB-CEC adapter. If the free `cec-client.exe` from libCEC is installed beside `Dashboard.exe` or in its standard Pulse-Eight folder, the dashboard detects it automatically and enables the physical standby path. No CEC adapter is required for the normal display-signal-off action.
 - **Check for update** under Settings > Audio + browser installs stable releases from `M-Tameem/projectordashboard`. It downloads `Dashboard.exe` and its SHA-256 checksum, verifies both the checksum and embedded version, closes the dashboard, replaces the executable through a temporary helper, and relaunches it. If the new build cannot start, the helper restores the previous executable. Until the repository has its first release, the button simply reports that no release has been published.
 - **Roll back to previous build** under Settings > Audio + browser restores the saved previous executable, or downloads the previous stable GitHub release if no usable local copy exists. It verifies the checksum and embedded version, shows the exact version for confirmation, then restarts without changing your configuration. The old build is preserved even when upgrading from an older updater that deletes its temporary backup. A manually overwritten installation can use the download fallback.
@@ -72,6 +72,14 @@ placeholder `{url}` where the address should be substituted.
 | Jellyfin | `http://192.168.1.20:8096` | `--app={url}` | |
 | VLC | `C:\Program Files\VideoLAN\VLC\vlc.exe` | `--fullscreen` | (non-web: args passed straight through) |
 | Any bookmark file | `C:\Users\you\Desktop\show.url` | | opened by Windows |
+
+## Memory + CPU
+
+Open **Memory + CPU** on the main screen or its Settings tab. The panel shows used/available physical RAM, system committed memory and its limit/peak, overall CPU, and each process's PID, RAM working set, private memory, CPU, and virtual address space. Sort by RAM, private memory, or CPU; filter to Supermium to see its subprocesses and their combined private-memory/CPU totals. Pause freezes the list while you inspect it.
+
+Sampling runs in the background every two seconds only while the panel is visible. The table virtualizes rows. CPU needs two samples and is normalized across all logical processors. RAM working sets include shared pages, so their sum is not the system's RAM usage. High commit usage can explain allocation failures; 32-bit apps can also run out of address space independently. These are live readings, not a diagnosis of an earlier crash.
+
+**End task** asks for confirmation and may discard unsaved work. It checks the selected process's start time again to avoid killing a different process after PID reuse. Windows/critical processes, other sessions, inaccessible processes, and the dashboard itself cannot be ended here.
 
 ## Built-in trackpad
 
@@ -122,6 +130,8 @@ src\VersionInfo.cs        app version stamped from v1.2.3 release tags
 src\Ui.cs                 theme, rounded controls, finger-sized TouchSlider
 src\NativeTrackpad.cs     WPF touch surface + native Windows pointer input
 src\TrackpadGesture.cs    event-driven tap, scroll, drag, and coordinate logic
+src\ResourceMonitor.cs    native memory/CPU sampling and guarded task controls
+src\ResourcePanel.cs      visible-only task-manager view
 src\DisplayPickerWindow.cs first-run screen assignment with identify flashes
 src\ControllerWindow.cs   the tablet UI + settings overlay
 src\ProjectorWindow.cs    ambient projector display (clock or blank)
@@ -169,6 +179,6 @@ Do not manually rename a different program to `Dashboard.exe`: the updater requi
 
 ## Development checks
 
-`powershell -ExecutionPolicy Bypass -File tests\run-windows.ps1` builds the x86 app using Windows’ bundled compiler, runs the gesture/coordinate and rollback checks, exercises window selection and native pointer delivery to a separate test app using simulated WPF touch contacts, and measures the real WPF dashboard and remote templates at common tablet sizes. The validation workflow runs these checks for pushes and pull requests. The input tests also run on macOS/Linux with `dotnet run --project tests/InputTests.csproj` (the .NET 8 SDK is a development dependency only).
+`powershell -ExecutionPolicy Bypass -File tests\run-windows.ps1` builds the x86 app using Windows’ bundled compiler, runs the gesture/coordinate, native memory/CPU, task-control, and rollback checks, exercises window selection and native pointer delivery to a separate test app using simulated WPF touch contacts, and measures the real WPF dashboard and remote templates at common tablet sizes. The validation workflow runs these checks for pushes and pull requests. The input tests also run on macOS/Linux with `dotnet run --project tests/InputTests.csproj` (the .NET 8 SDK is a development dependency only).
 
 Before using a new build on the tablet, check one- and two-finger gestures, double-click, right-click, drag cancellation, fullscreen preview, and reconnecting the projector. Also check volume/output selection, both brightness sliders, keyboard placement, alarm dismissal/snooze, and returning from tablet-only playback. Compilation and layout measurements do not replace physical touchscreen, audio, and display testing on Windows 8.1.
