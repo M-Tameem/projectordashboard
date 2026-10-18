@@ -136,16 +136,16 @@ namespace ProjectorDash
             }
             else
             {
-                Bg = Hex("#060A0E"); Panel = Hex("#0D151C"); PanelHi = Hex("#121F28");
-                Line = Hex("#1C3540"); Text = Hex("#EDF7F8"); TextDim = Hex("#79909A");
-                Accent = Hex("#59DCE2"); AccentDim = Hex("#10363C");
-                SurfaceLow = Hex("#091218"); Overlay = Hex("#071015"); SkyBg = Hex("#04090C");
+                Bg = Hex("#101415"); Panel = Hex("#191F20"); PanelHi = Hex("#242D2E");
+                Line = Hex("#323D3E"); Text = Hex("#E9EFEC"); TextDim = Hex("#A1AFAC");
+                Accent = Hex("#9ADBD0"); AccentDim = Hex("#253F3B");
+                SurfaceLow = Hex("#141A1B"); Overlay = Hex("#101415"); SkyBg = Hex("#04090C");
                 SourceDim = Hex("#4D6971"); ReservedDim = Hex("#3E5961"); Ink = Hex("#041014");
                 MapCorner = Hex("#25434B"); MapGrid = Hex("#132A31"); MapGridText = Hex("#38525A");
                 MapZenith = Hex("#78939A"); AircraftHistory = Hex("#317D86");
                 AircraftOutline = Hex("#D5FFFF"); AircraftCourse = Hex("#1B4851");
                 LabelBg = Hex("#071116"); LabelLine = Hex("#1C3941");
-                _gradientStart = "#05090C"; _gradientMid = "#071218"; _gradientEnd = "#0A2027";
+                _gradientStart = "#101415"; _gradientMid = "#101415"; _gradientEnd = "#14201E";
                 _projectorCenter = "#0B2228"; _projectorOuter = "#03070A";
             }
 
@@ -227,11 +227,14 @@ namespace ProjectorDash
                     "<Border x:Name=\"bd\" Background=\"{TemplateBinding Background}\"" +
                     " BorderBrush=\"{TemplateBinding BorderBrush}\"" +
                     " BorderThickness=\"{TemplateBinding BorderThickness}\"" +
-                    " CornerRadius=\"9\">" +
-                    "<ContentPresenter HorizontalAlignment=\"Center\" VerticalAlignment=\"Center\"" +
+                    " CornerRadius=\"14\">" +
+                    "<ContentPresenter HorizontalAlignment=\"{TemplateBinding HorizontalContentAlignment}\" VerticalAlignment=\"Center\"" +
                     " Margin=\"{TemplateBinding Padding}\"/>" +
                     "</Border>" +
                     "<ControlTemplate.Triggers>" +
+                    "<Trigger Property=\"IsMouseOver\" Value=\"True\">" +
+                    "<Setter TargetName=\"bd\" Property=\"Opacity\" Value=\"0.85\"/>" +
+                    "</Trigger>" +
                     "<Trigger Property=\"IsPressed\" Value=\"True\">" +
                     "<Setter TargetName=\"bd\" Property=\"Opacity\" Value=\"0.55\"/>" +
                     "</Trigger>" +
@@ -250,6 +253,8 @@ namespace ProjectorDash
         {
             Button b = new Button();
             b.Content = text;
+            b.HorizontalContentAlignment = HorizontalAlignment.Center;
+            System.Windows.Automation.AutomationProperties.SetName(b, text);
             b.FontSize = fontSize;
             b.FontFamily = new FontFamily(FontUi);
             b.Background = bg;
@@ -265,14 +270,14 @@ namespace ProjectorDash
             return b;
         }
 
-        /// <summary>Compact, uppercase action used by the controller toolbar.</summary>
+        /// <summary>Quiet, finger-sized action used by the controller toolbar.</summary>
         public static Button HeaderBtn(string text, RoutedEventHandler click)
         {
-            Button b = Btn(text.ToUpperInvariant(), 13, Panel, Text, click);
+            Button b = Btn(text, 15, Panel, Text, click);
             b.FontWeight = FontWeights.SemiBold;
             b.MinWidth = 84;
-            b.Height = 48;
-            b.MinHeight = 48;
+            b.Height = 52;
+            b.MinHeight = 52;
             b.Padding = new Thickness(13, 7, 13, 7);
             b.Margin = new Thickness(0, 0, 8, 0);
             return b;
@@ -292,11 +297,11 @@ namespace ProjectorDash
 
             TextBlock title = new TextBlock();
             title.Text = name;
-            title.FontSize = 22;
+            title.FontSize = 19;
             title.FontFamily = new FontFamily(FontUi);
             title.FontWeight = FontWeights.SemiBold;
             title.Foreground = Text;
-            title.TextAlignment = TextAlignment.Center;
+            title.TextAlignment = TextAlignment.Left;
             title.TextTrimming = TextTrimming.CharacterEllipsis;
             sp.Children.Add(title);
 
@@ -304,20 +309,21 @@ namespace ProjectorDash
             sub.Text = detail;
             sub.FontSize = 12;
             sub.Foreground = TextDim;
-            sub.TextAlignment = TextAlignment.Center;
+            sub.TextAlignment = TextAlignment.Left;
             sub.TextTrimming = TextTrimming.CharacterEllipsis;
             sub.Margin = new Thickness(0, 4, 0, 0);
             sp.Children.Add(sub);
 
             Grid body = new Grid();
             body.VerticalAlignment = VerticalAlignment.Center;
+            body.Margin = new Thickness(0, 0, 14, 0);
             body.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             body.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
             Border badge = new Border();
-            badge.Width = 36;
-            badge.Height = 36;
-            badge.Margin = new Thickness(10, 0, 9, 0);
+            badge.Width = 42;
+            badge.Height = 42;
+            badge.Margin = new Thickness(14, 0, 12, 0);
             badge.Background = AccentDim;
             badge.BorderBrush = Line;
             badge.BorderThickness = new Thickness(1);
@@ -346,9 +352,11 @@ namespace ProjectorDash
 
             Button b = new Button();
             b.Content = body;
-            b.Width = 196;
-            b.Height = 62;
-            b.Margin = new Thickness(3);
+            b.Width = 220;
+            b.Height = 88;
+            b.Margin = new Thickness(4);
+            b.HorizontalContentAlignment = HorizontalAlignment.Stretch;
+            System.Windows.Automation.AutomationProperties.SetName(b, name + ", " + detail);
             b.Background = Panel;
             b.BorderBrush = Line;
             b.BorderThickness = new Thickness(1);
@@ -393,14 +401,16 @@ namespace ProjectorDash
     public class TouchSlider : Grid
     {
         private readonly Border _fill;
+        private readonly TextBlock _readout;
         private int _value; // 0..100
         private bool _dragging;
 
         public event Action<int> ValueChanged;
+        public event Action ValueCommitted;
 
         public TouchSlider()
         {
-            Height = 58;
+            Height = 48;
             Background = Ui.Panel;
             ClipToBounds = true;
 
@@ -418,6 +428,19 @@ namespace ProjectorDash
             _fill.CornerRadius = new CornerRadius(10, 0, 0, 10);
             _fill.HorizontalAlignment = HorizontalAlignment.Left;
             Children.Add(_fill);
+            _readout = Ui.Label("0%", 15, Ui.Text);
+            _readout.HorizontalAlignment = HorizontalAlignment.Center;
+            _readout.VerticalAlignment = VerticalAlignment.Center;
+            _readout.IsHitTestVisible = false;
+            Children.Add(_readout);
+            Stylus.SetIsPressAndHoldEnabled(this, false);
+            Stylus.SetIsFlicksEnabled(this, false);
+            LostMouseCapture += delegate
+            {
+                if (!_dragging) return;
+                _dragging = false;
+                if (ValueCommitted != null) ValueCommitted();
+            };
 
             MouseLeftButtonDown += OnDown;
             MouseMove += OnMove;
@@ -457,6 +480,7 @@ namespace ProjectorDash
         {
             _dragging = false;
             ReleaseMouseCapture();
+            if (ValueCommitted != null) ValueCommitted();
         }
 
         private void Apply(double x)
@@ -479,6 +503,7 @@ namespace ProjectorDash
             double w = ActualWidth * (_value / 100.0);
             if (w < 0) w = 0;
             _fill.Width = w;
+            if (_readout != null) _readout.Text = _value.ToString() + "%";
         }
     }
 }

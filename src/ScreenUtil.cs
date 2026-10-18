@@ -240,6 +240,8 @@ namespace ProjectorDash
             if (window == null || screen == null) return;
             IntPtr hwnd = new WindowInteropHelper(window).EnsureHandle();
             System.Drawing.Rectangle work = screen.WorkingArea;
+            width = Math.Min(width, Math.Max(1, work.Width - 24));
+            height = Math.Min(height, Math.Max(1, work.Height - 24));
             int x = work.Right - width - 12;
             int y = work.Top + 12;
             SetWindowPos(hwnd, HwndTopmost, x, y, width, height,
@@ -391,6 +393,37 @@ namespace ProjectorDash
             RemoveProp(hwnd, ShortcutProperty);
         }
 
+        /// <summary>Focus without restoring/resizing the app on every gesture.</summary>
+        public static bool FocusInputWindow(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero || !IsWindow(hwnd)) return false;
+            if (GetForegroundWindow() == hwnd) return true;
+            BringWindowToTop(hwnd);
+            return SetForegroundWindow(hwnd);
+        }
+
+        // Absolute coordinates include negative-origin displays and span the
+        // virtual desktop. INPUT's union preserves the native x86/x64 layout.
+        // https://learn.microsoft.com/windows/win32/api/winuser/ns-winuser-mouseinput
+        public static bool InjectPointer(double x, double y, uint flags, int data)
+        {
+            System.Drawing.Rectangle desktop = SystemInformation.VirtualScreen;
+            NativeInput input = new NativeInput();
+            input.data.mouse.dx = PointerMath.Normalize(x, desktop.Left, desktop.Width);
+            input.data.mouse.dy = PointerMath.Normalize(y, desktop.Top, desktop.Height);
+            input.data.mouse.flags = 0x8000 | 0x4000 | 0x0001 | flags;
+            input.data.mouse.mouseData = unchecked((uint)data);
+            return SendInput(1, new NativeInput[] { input },
+                Marshal.SizeOf(typeof(NativeInput))) == 1;
+        }
+
+        public static void ReleasePointerButton(bool right)
+        {
+            NativeInput input = new NativeInput();
+            input.data.mouse.flags = right ? 0x0010u : 0x0004u;
+            SendInput(1, new NativeInput[] { input }, Marshal.SizeOf(typeof(NativeInput)));
+        }
+
         /// <summary>Sends one ordinary virtual key to the selected app.</summary>
         public static bool SendVirtualKey(IntPtr hwnd, int virtualKey)
         {
@@ -441,7 +474,7 @@ namespace ProjectorDash
 
         /// <summary>
         /// Positions the classic on-screen keyboard in the lower-left portion
-        /// of the tablet, keeping the configured TouchMousePointer rectangle
+        /// of the tablet, keeping the built-in trackpad area
         /// clear in the lower-right.
         /// </summary>
         public static void PlaceKeyboardWindow(IntPtr hwnd, Screen tablet,

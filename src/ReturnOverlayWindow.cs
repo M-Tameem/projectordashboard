@@ -1,6 +1,7 @@
 using System;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using WinForms = System.Windows.Forms;
 
 namespace ProjectorDash
@@ -30,7 +31,7 @@ namespace ProjectorDash
             Border card = new Border();
             card.Padding = new Thickness(7);
             card.Background = Ui.ReturnShade;
-            card.BorderBrush = Ui.Accent;
+            card.BorderBrush = Ui.Line;
             card.BorderThickness = new Thickness(1);
             card.CornerRadius = new CornerRadius(12);
 
@@ -50,7 +51,7 @@ namespace ProjectorDash
             dashboard.Margin = new Thickness(0, 0, 7, 0);
             buttons.Children.Add(dashboard);
 
-            Button remote = Ui.Btn("REMOTE", 13, Ui.PanelHi, Ui.Text,
+            Button remote = Ui.Btn("Remote", 13, Ui.PanelHi, Ui.Text,
                 delegate { if (showRemote != null) showRemote(); });
             remote.MinHeight = 56;
             remote.Margin = new Thickness(0, 0, 7, 0);
@@ -60,7 +61,7 @@ namespace ProjectorDash
 
             if (screenOffEnabled)
             {
-                Button sleep = Ui.Btn("SCREEN OFF", 13, Ui.PanelHi, Ui.Accent,
+                Button sleep = Ui.Btn("Screen off", 13, Ui.PanelHi, Ui.Accent,
                     delegate { if (sleepDisplay != null) sleepDisplay(); });
                 sleep.MinHeight = 56;
                 sleep.Margin = new Thickness(0, 0, 7, 0);
@@ -70,11 +71,33 @@ namespace ProjectorDash
                 buttons.Children.Add(sleep);
             }
 
-            Button off = Ui.Btn("OFF", 16, Ui.DangerFill, Ui.DangerText,
-                delegate { if (emergencyOff != null) emergencyOff(); });
+            Popup powerMenu = new Popup { Placement = PlacementMode.Bottom, StaysOpen = false,
+                AllowsTransparency = true };
+            Border powerCard = new Border { Width = 320, Padding = new Thickness(18),
+                Background = Ui.Panel, BorderBrush = Ui.Line, BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(14) };
+            StackPanel powerActions = new StackPanel();
+            TextBlock powerNote = Ui.Label("Lock Windows and turn off all displays. This also closes every Supermium tab.", 16, Ui.Text);
+            powerNote.TextWrapping = TextWrapping.Wrap;
+            powerActions.Children.Add(powerNote);
+            Button confirmOff = Ui.Btn("Lock & turn off", 17, Ui.DangerFill, Ui.DangerText, delegate
+            {
+                powerMenu.IsOpen = false;
+                if (emergencyOff != null) emergencyOff();
+            });
+            confirmOff.Margin = new Thickness(0, 14, 0, 8);
+            powerActions.Children.Add(confirmOff);
+            powerActions.Children.Add(Ui.Btn("Cancel", 16, Ui.PanelHi, Ui.Text,
+                delegate { powerMenu.IsOpen = false; }));
+            powerCard.Child = powerActions; powerMenu.Child = powerCard;
+            Button off = Ui.Btn("Power", 13, Ui.PanelHi, Ui.Text,
+                delegate { powerMenu.IsOpen = true; });
+            off.Padding = new Thickness(8, 10, 8, 10);
+            powerMenu.PlacementTarget = off;
+            IsVisibleChanged += delegate { if (!IsVisible) powerMenu.IsOpen = false; };
             off.MinHeight = 56;
-            off.BorderBrush = Ui.Danger;
-            off.ToolTip = "Close all Supermium tabs, lock Windows, and turn off every display.";
+            off.BorderBrush = Ui.Line;
+            off.ToolTip = "Power options";
             Grid.SetColumn(off, 3);
             buttons.Children.Add(off);
 
@@ -83,7 +106,8 @@ namespace ProjectorDash
             SourceInitialized += delegate
             {
                 ScreenUtil.PlaceTopRightOverlay(this, tablet,
-                    screenOffEnabled ? 510 : 399, 78);
+                    (int)((screenOffEnabled ? 510 : 399) * ScreenUtil.DpiScale(this)),
+                    (int)(78 * ScreenUtil.DpiScale(this)));
             };
         }
     }

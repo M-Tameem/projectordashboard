@@ -17,7 +17,7 @@ namespace ProjectorDash
     /// </summary>
     public static class VersionInfo
     {
-        public const string ProductVersion = "1.0.0";
-        public const string AssemblyVersion = "1.0.0.0";
+        public const string ProductVersion = "1.5.0";
+        public const string AssemblyVersion = "1.5.0.0";
     }
 }

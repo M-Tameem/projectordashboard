@@ -26,6 +26,8 @@ namespace ProjectorDash
         public string Message = "";
         public string ReleaseVersion = "";
         public string DownloadedPath = "";
+        public string ExpectedSha256 = "";
+        public bool IsRollback;
     }
 
     /// <summary>
@@ -40,6 +42,8 @@ namespace ProjectorDash
             "https://github.com/M-Tameem/projectordashboard";
         private const string LatestReleaseApi =
             "https://api.github.com/repos/M-Tameem/projectordashboard/releases/latest";
+        private const string ReleasesApi =
+            "https://api.github.com/repos/M-Tameem/projectordashboard/releases?per_page=30";
         private const string ExecutableAssetName = "Dashboard.exe";
         private const string ChecksumAssetName = "Dashboard.exe.sha256";
         private const long MaxExecutableBytes = 32L * 1024L * 1024L;
@@ -54,6 +58,8 @@ namespace ProjectorDash
         private sealed class ReleaseDescription
         {
             public string tag_name { get; set; }
+            public bool draft { get; set; }
+            public bool prerelease { get; set; }
             public string html_url { get; set; }
             public List<ReleaseAsset> assets { get; set; }
         }
@@ -75,7 +81,6 @@ namespace ProjectorDash
         /// </summary>
         public static UpdateResult CheckAndDownload(Action<string> progress)
         {
-            string updatePath = "";
             try
             {
                 EnableTls12();
@@ -117,6 +122,20 @@ namespace ProjectorDash
                     return upToDate;
                 }
 
+                return DownloadRelease(release, latest, progress);
+            }
+            catch (Exception ex)
+            {
+                return Result(UpdateResultKind.Error, FriendlyNetworkError(ex));
+            }
+        }
+
+        private static UpdateResult DownloadRelease(ReleaseDescription release, Version latest,
+            Action<string> progress)
+        {
+            string updatePath = "";
+            try
+            {
                 ReleaseAsset executable = FindAsset(release.assets, ExecutableAssetName);
                 ReleaseAsset checksum = FindAsset(release.assets, ChecksumAssetName);
                 if (executable == null || checksum == null)
@@ -174,6 +193,7 @@ namespace ProjectorDash
                     "Projector Dashboard " + FormatVersion(latest) + " is ready to install.");
                 ready.ReleaseVersion = FormatVersion(latest);
                 ready.DownloadedPath = updatePath;
+                ready.ExpectedSha256 = expectedHash;
                 return ready;
             }
             catch (Exception ex)
@@ -181,6 +201,115 @@ namespace ProjectorDash
                 if (!string.IsNullOrEmpty(updatePath)) TryDelete(updatePath);
                 return Result(UpdateResultKind.Error, FriendlyNetworkError(ex));
             }
+        }
+
+        public static string RollbackVersion
+        {
+            get
+            {
+                string path = Assembly.GetExecutingAssembly().Location + ".rollback";
+                Version version;
+                return ValidRollback(path, out version) ? FormatVersion(version) : "";
+            }
+        }
+
+        /// <summary>Prefer the last installed build, including offline rollback.</summary>
+        public static UpdateResult PrepareRollback(Action<string> progress)
+        {
+            string updatePath = Assembly.GetExecutingAssembly().Location + ".update";
+            try
+            {
+                string saved = Assembly.GetExecutingAssembly().Location + ".rollback";
+                Version version;
+                if (ValidRollback(saved, out version))
+                {
+                    Report(progress, "Preparing saved version " + FormatVersion(version) + "…");
+                    File.Copy(saved, updatePath, true);
+                    return new UpdateResult { Kind = UpdateResultKind.Ready, IsRollback = true,
+                        ReleaseVersion = FormatVersion(version), DownloadedPath = updatePath,
+                        ExpectedSha256 = ComputeSha256(updatePath),
+                        Message = "The saved previous build is ready." };
+                }
+
+                EnableTls12();
+                Report(progress, "Finding the previous stable release…");
+                List<ReleaseDescription> releases = new JavaScriptSerializer()
+                    .Deserialize<List<ReleaseDescription>>(DownloadString(ReleasesApi));
+                ReleaseDescription selected = null;
+                Version selectedVersion = null;
+                Version current = Assembly.GetExecutingAssembly().GetName().Version;
+                if (releases != null) foreach (ReleaseDescription release in releases)
+                {
+                    Version candidate;
+                    if (release == null || release.draft || release.prerelease ||
+                        !TryParseReleaseVersion(release.tag_name, out candidate) ||
+                        candidate.CompareTo(current) >= 0 ||
+                        FindAsset(release.assets, ExecutableAssetName) == null ||
+                        FindAsset(release.assets, ChecksumAssetName) == null) continue;
+                    if (selectedVersion == null || candidate.CompareTo(selectedVersion) > 0)
+                    {
+                        selected = release; selectedVersion = candidate;
+                    }
+                }
+                if (selected == null) return Result(UpdateResultKind.NoRelease,
+                    "No previous stable release is available to roll back to.");
+                UpdateResult result = DownloadRelease(selected, selectedVersion, progress);
+                result.IsRollback = true;
+                return result;
+            }
+            catch (Exception ex)
+            {
+                TryDelete(updatePath);
+                return Result(UpdateResultKind.Error, "Rollback could not be prepared.\n\n" + ex.Message);
+            }
+        }
+
+        public static void DiscardDownload(UpdateResult result)
+        {
+            string expected = Assembly.GetExecutingAssembly().Location + ".update";
+            if (result != null && string.Equals(result.DownloadedPath, expected,
+                StringComparison.OrdinalIgnoreCase)) TryDelete(expected);
+        }
+
+        private static bool ValidRollback(string path, out Version version)
+        {
+            version = null;
+            try
+            {
+                if (!File.Exists(path) || !File.Exists(path + ".sha256")) return false;
+                AssemblyName candidate = AssemblyName.GetAssemblyName(path);
+                AssemblyName current = Assembly.GetExecutingAssembly().GetName();
+                if (candidate.Name != current.Name || candidate.Version == null ||
+                    candidate.Version.CompareTo(current.Version) >= 0) return false;
+                string checksum = ParseSha256(File.ReadAllText(path + ".sha256"));
+                if (checksum.Length == 0 || checksum != ComputeSha256(path)) return false;
+                version = candidate.Version;
+                return true;
+            }
+            catch { return false; }
+        }
+
+        // Called before acknowledging startup, including when an OLD helper
+        // is installing us: that helper deletes .previous after the marker.
+        private static void PreserveRollback(string targetPath)
+        {
+            string previous = targetPath + ".previous";
+            string rollback = targetPath + ".rollback";
+            string staging = rollback + ".tmp";
+            try
+            {
+                if (!File.Exists(previous) || !File.Exists(targetPath)) return;
+                AssemblyName oldBuild = AssemblyName.GetAssemblyName(previous);
+                AssemblyName newBuild = AssemblyName.GetAssemblyName(targetPath);
+                if (oldBuild.Name != newBuild.Name || oldBuild.Version == null ||
+                    newBuild.Version == null || oldBuild.Version.CompareTo(newBuild.Version) >= 0) return;
+                File.Copy(previous, staging, true);
+                string hash = ComputeSha256(staging);
+                File.Copy(staging, rollback, true);
+                File.WriteAllText(rollback + ".sha256", hash, Encoding.ASCII);
+            }
+            catch (Exception ex) { WriteLog("Could not preserve offline rollback: " + ex.Message); }
+            finally { TryDelete(staging); }
         }
 
         /// <summary>
@@ -215,7 +344,8 @@ namespace ProjectorDash
                 start.Arguments = "--apply-update " + processId.ToString() + " " +
                     QuoteArgument(currentPath) + " " +
                     QuoteArgument(result.DownloadedPath) + " " +
-                    QuoteArgument(result.ReleaseVersion);
+                    QuoteArgument(result.ReleaseVersion) + " " +
+                    QuoteArgument(result.ExpectedSha256);
                 start.UseShellExecute = false;
                 start.CreateNoWindow = true;
                 start.WindowStyle = ProcessWindowStyle.Hidden;
@@ -244,6 +374,7 @@ namespace ProjectorDash
             string releaseVersion = args.Length > 4 ? args[4] : "";
             string helperPath = Assembly.GetExecutingAssembly().Location;
             string backupPath = targetPath + ".previous";
+            bool replacementCompleted = false;
             try
             {
                 int parentId;
@@ -251,12 +382,18 @@ namespace ProjectorDash
                     string.IsNullOrEmpty(targetPath) || string.IsNullOrEmpty(updatePath))
                     throw new InvalidDataException("The update helper arguments are invalid.");
 
+                Version expectedVersion;
+                AssemblyName staged = AssemblyName.GetAssemblyName(updatePath);
+                if (!TryParseReleaseVersion("v" + releaseVersion, out expectedVersion) ||
+                    staged.Name != Assembly.GetExecutingAssembly().GetName().Name ||
+                    staged.Version == null || staged.Version.CompareTo(expectedVersion) != 0 ||
+                    args.Length < 6 || ParseSha256(args[5]).Length == 0 ||
+                    !string.Equals(ComputeSha256(updatePath), args[5], StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException("The staged build failed its final verification.");
                 WaitForProcess(parentId, 30000);
-                // A successful prior update normally removes this backup. If
-                // one survived a power loss but the currently running target
-                // still exists, that target is the known-good rollback copy.
-                if (File.Exists(targetPath)) TryDelete(backupPath);
                 ReplaceWithRetry(targetPath, updatePath, backupPath);
+                replacementCompleted = true;
+                PreserveRollback(targetPath);
 
                 string readyMarker = Path.Combine(Path.GetTempPath(),
                     "ProjectorDashboard-UpdateReady-" + Guid.NewGuid().ToString("N") + ".tmp");
@@ -289,13 +426,23 @@ namespace ProjectorDash
             {
                 try
                 {
-                    if (!string.IsNullOrEmpty(backupPath) && File.Exists(backupPath))
+                    if (replacementCompleted && !string.IsNullOrEmpty(backupPath) && File.Exists(backupPath))
                     {
                         RestoreBackup(targetPath, backupPath);
                         Process.Start(targetPath);
                     }
                 }
                 catch { }
+                if (!replacementCompleted && File.Exists(targetPath))
+                {
+                    try
+                    {
+                        int parentId;
+                        if (args.Length > 1 && int.TryParse(args[1], out parentId)) WaitForProcess(parentId, 30000);
+                        Process.Start(targetPath);
+                    }
+                    catch { }
+                }
                 WriteLog("Update failed: " + ex.Message);
             }
             finally
@@ -315,6 +462,7 @@ namespace ProjectorDash
                 if (!marker.StartsWith(temp, StringComparison.OrdinalIgnoreCase)) return;
                 if (!Path.GetFileName(marker).StartsWith(
                     "ProjectorDashboard-UpdateReady-", StringComparison.OrdinalIgnoreCase)) return;
+                PreserveRollback(Assembly.GetExecutingAssembly().Location);
                 File.WriteAllText(marker, "ready", Encoding.ASCII);
             }
             catch { }
@@ -433,9 +581,10 @@ namespace ProjectorDash
             try
             {
                 using (Process process = Process.GetProcessById(processId))
-                    process.WaitForExit(timeoutMs);
+                    if (!process.WaitForExit(timeoutMs))
+                        throw new IOException("The dashboard is still running. Close it and try again.");
             }
-            catch { }
+            catch (ArgumentException) { } // Parent already exited.
             Thread.Sleep(300);
         }
 
@@ -448,10 +597,8 @@ namespace ProjectorDash
                 {
                     if (!File.Exists(update))
                         throw new FileNotFoundException("The downloaded update disappeared.", update);
-                    if (File.Exists(target) && !File.Exists(backup))
-                        File.Move(target, backup);
-                    if (File.Exists(target)) File.Delete(target);
-                    File.Move(update, target);
+                    if (File.Exists(target)) File.Replace(update, target, backup, true);
+                    else File.Move(update, target);
                     return;
                 }
                 catch (Exception ex)
@@ -482,16 +629,19 @@ namespace ProjectorDash
 
         private static void RestoreBackup(string target, string backup)
         {
+            if (!File.Exists(backup)) throw new FileNotFoundException("The previous build is missing.", backup);
+            Exception last = null;
             for (int attempt = 0; attempt < 20; attempt++)
             {
                 try
                 {
-                    if (File.Exists(target)) File.Delete(target);
-                    if (File.Exists(backup)) File.Move(backup, target);
+                    if (File.Exists(target)) File.Replace(backup, target, null, true);
+                    else File.Move(backup, target);
                     return;
                 }
-                catch { Thread.Sleep(250); }
+                catch (Exception ex) { last = ex; Thread.Sleep(250); }
             }
+            throw new IOException("Windows could not restore the previous build.", last);
         }
 
         private static string QuoteArgument(string value)

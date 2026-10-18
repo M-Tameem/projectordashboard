@@ -18,8 +18,7 @@ using WinForms = System.Windows.Forms;
 namespace ProjectorDash
 {
     /// <summary>
-    /// The tablet-facing control surface. Everything interactive lives outside
-    /// the bottom-right reserved rectangle, which belongs to TouchMousePointer.
+    /// The tablet-facing control surface. Large, quiet controls and a native touch trackpad share one surface.
     /// </summary>
     public class ControllerWindow : Window
     {
@@ -61,6 +60,7 @@ namespace ProjectorDash
         private int _externalTextFocusMisses;
 
         // Layout pieces that depend on config / DPI
+        private NativeTrackpad _trackpad;
         private RowDefinition _bottomRow;
         private ColumnDefinition _reservedCol;
 
@@ -77,13 +77,13 @@ namespace ProjectorDash
         private TouchSlider _projectorBriSlider;
         private TextBlock _projectorBriValueText;
         private Button _sleepBtn;
-        private Button _autoLockBtn;
         private Button _previewBtn;
         private Button _colorThemeBtn;
         private Button _mainOverheadBtn;
         private Button _aircraftRangeBtn;
         private Button _overheadRangeBtn;
         private Button _updateBtn;
+        private Button _rollbackBtn;
         private Button _autoLockToggleBtn;
         private Popup _autoLockPopup;
         private Popup _powerPopup;
@@ -181,7 +181,9 @@ namespace ProjectorDash
             WindowStyle = WindowStyle.None;
             ResizeMode = ResizeMode.NoResize;
 
+            UseLayoutRounding = true;
             Content = BuildLayout();
+            SizeChanged += delegate { ApplyReservedSize(); };
             AddHandler(Keyboard.GotKeyboardFocusEvent,
                 new KeyboardFocusChangedEventHandler(OnTextInputFocused), true);
 
@@ -225,6 +227,7 @@ namespace ProjectorDash
 
         private void OnClosedExit(object sender, EventArgs e)
         {
+            if (_trackpad != null) _trackpad.Cancel();
             // Requirement: closing the controller exits the whole app.
             CancelSkyRefresh();
             _cfg.Save();
@@ -323,6 +326,7 @@ namespace ProjectorDash
 
         private void CycleColorTheme()
         {
+            if (_updateBusy) return;
             _cfg.ColorTheme = Ui.NextTheme(_cfg.ColorTheme);
             _cfg.Save();
             Ui.ApplyTheme(_cfg.ColorTheme);
@@ -350,6 +354,7 @@ namespace ProjectorDash
                 _remoteWindow = null;
             }
 
+            if (_trackpad != null) _trackpad.Cancel();
             Background = Ui.BgGradient();
             Content = BuildLayout();
             ApplyReservedSize();
@@ -372,306 +377,219 @@ namespace ProjectorDash
 
         private UIElement BuildLayout()
         {
-            Grid root = new Grid();
+            Grid root = new Grid { Margin = new Thickness(22), UseLayoutRounding = true };
             root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-            _bottomRow = new RowDefinition { Height = new GridLength(340) };
+            _bottomRow = new RowDefinition { Height = new GridLength(240) };
             root.RowDefinitions.Add(_bottomRow);
-
             root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            _reservedCol = new ColumnDefinition { Width = new GridLength(420) };
+            _reservedCol = new ColumnDefinition { Width = new GridLength(400) };
             root.ColumnDefinitions.Add(_reservedCol);
 
-            // --- Compact instrument header --------------------------------
-            Border headerCard = new Border();
-            headerCard.Margin = new Thickness(18, 10, 18, 4);
-            headerCard.Padding = new Thickness(16, 8, 10, 8);
-            headerCard.Background = Ui.Panel;
-            headerCard.BorderBrush = Ui.Line;
-            headerCard.BorderThickness = new Thickness(1);
-            headerCard.CornerRadius = new CornerRadius(11);
-            Grid header = new Grid();
-            header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(205) });
+            Grid header = new Grid { Margin = new Thickness(4, 0, 4, 18) };
+            header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(300) });
             header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-
-            StackPanel clockStack = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
-            _clockText = new TextBlock();
+            StackPanel clock = new StackPanel();
+            _clockText = Ui.Label("", 68, Ui.Text);
             _clockText.FontFamily = new FontFamily(Ui.FontLight);
-            _clockText.FontSize = 54;
-            _clockText.Foreground = Ui.Text;
-            _clockText.Margin = new Thickness(0, -8, 0, 0);
-            clockStack.Children.Add(_clockText);
-            _dateText = Ui.Label("", 15, Ui.TextDim);
-            _dateText.Margin = new Thickness(2, -5, 0, 0);
-            clockStack.Children.Add(_dateText);
-            _alarmStatusText = Ui.Label("", 12, Ui.Accent);
-            _alarmStatusText.Margin = new Thickness(2, 3, 0, 0);
-            clockStack.Children.Add(_alarmStatusText);
-            header.Children.Add(clockStack);
+            _clockText.Margin = new Thickness(-3, -12, 0, -6);
+            clock.Children.Add(_clockText);
+            _dateText = Ui.Label("", 14, Ui.TextDim);
+            _dateText.VerticalAlignment = VerticalAlignment.Center;
+            DockPanel dateAndAlarm = new DockPanel();
+            _alarmStatusText = Ui.Label("", 13, Ui.Accent);
+            Button alarm = Ui.Btn("", 13, Brushes.Transparent, Ui.Accent, delegate { OpenSettings(3); });
+            alarm.Content = _alarmStatusText;
+            alarm.BorderThickness = new Thickness(0);
+            alarm.Padding = new Thickness(0, 4, 12, 4);
+            alarm.MinHeight = 32;
+            alarm.HorizontalAlignment = HorizontalAlignment.Left;
+            alarm.ToolTip = "Set your alarm";
+            DockPanel.SetDock(alarm, Dock.Right);
+            dateAndAlarm.Children.Add(alarm);
+            dateAndAlarm.Children.Add(_dateText);
+            clock.Children.Add(dateAndAlarm);
+            header.Children.Add(clock);
 
-            Grid weather = new Grid { Margin = new Thickness(4, 0, 18, 0) };
+            Grid weather = new Grid { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 20, 0) };
             weather.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            weather.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            _weatherTempText = Ui.Label("--", 38, Ui.Text);
+            weather.ColumnDefinitions.Add(new ColumnDefinition());
+            _weatherTempText = Ui.Label("--", 44, Ui.Text);
             _weatherTempText.FontFamily = new FontFamily(Ui.FontLight);
-            _weatherTempText.Width = 105;
-            _weatherTempText.VerticalAlignment = VerticalAlignment.Center;
+            _weatherTempText.Margin = new Thickness(0, 0, 16, 0);
             weather.Children.Add(_weatherTempText);
-            StackPanel weatherCopy = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
-            _weatherConditionText = Ui.Label("SET LOCATION", 13, Ui.Accent);
-            _weatherConditionText.FontWeight = FontWeights.SemiBold;
-            weatherCopy.Children.Add(_weatherConditionText);
-            _weatherMetaText = Ui.Label("Settings › Ambient", 13, Ui.TextDim);
+            StackPanel forecast = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+            _weatherConditionText = Ui.Label("Set your location", 15, Ui.Text);
+            _weatherConditionText.TextTrimming = TextTrimming.CharacterEllipsis;
+            _weatherMetaText = Ui.Label("Settings › Ambient", 12, Ui.TextDim);
             _weatherMetaText.TextTrimming = TextTrimming.CharacterEllipsis;
-            weatherCopy.Children.Add(_weatherMetaText);
-            _sunriseText = Ui.Label("NEXT SUNRISE  --", 11, Ui.Sunrise);
-            _sunriseText.Margin = new Thickness(0, 2, 0, 0);
-            weatherCopy.Children.Add(_sunriseText);
-            TextBlock source = Ui.Label("OPEN-METEO", 10, Ui.SourceDim);
-            source.Margin = new Thickness(0, 3, 0, 0);
-            weatherCopy.Children.Add(source);
-            Grid.SetColumn(weatherCopy, 1);
-            weather.Children.Add(weatherCopy);
-            Grid.SetColumn(weather, 1);
-            header.Children.Add(weather);
+            _sunriseText = Ui.Label("", 12, Ui.Sunrise);
+            _sunriseText.Margin = new Thickness(0, 5, 0, 0);
+            forecast.Children.Add(_weatherConditionText);
+            forecast.Children.Add(_weatherMetaText);
+            forecast.Children.Add(_sunriseText);
+            Grid.SetColumn(forecast, 1); weather.Children.Add(forecast);
+            Grid.SetColumn(weather, 1); header.Children.Add(weather);
 
-            StackPanel actions = new StackPanel
-            {
-                Orientation = Orientation.Horizontal,
-                HorizontalAlignment = HorizontalAlignment.Right,
-                VerticalAlignment = VerticalAlignment.Center
-            };
-            _sleepBtn = Ui.HeaderBtn(_cfg.TabletOnlyMode ? "Hide" : "Idle",
-                delegate { ToggleProjectorSleep(); });
-            _sleepBtn.ToolTip = _cfg.TabletOnlyMode
-                ? "Hide the tablet app without closing its tabs; tap again to restore it."
-                : "Hide projector apps without closing their tabs; tap again to wake.";
-            actions.Children.Add(_sleepBtn);
-
-            _previewBtn = _cfg.TabletOnlyMode
-                ? Ui.HeaderBtn("Screen off", delegate { SleepTabletDisplay(); })
-                : Ui.HeaderBtn("View", delegate { OpenPreview(); });
-            _previewBtn.ToolTip = _cfg.TabletOnlyMode
-                ? "Turn off the tablet display while audio keeps playing. Tap the screen to wake it."
-                : "Show a live copy of the current projector window without opening another tab.";
-            actions.Children.Add(_previewBtn);
-
-            Button remote = Ui.HeaderBtn("Remote", delegate { OpenRemote(); });
-            remote.ToolTip = "Playback, volume, fullscreen, escape, enter, and keyboard controls for the current app.";
-            actions.Children.Add(remote);
-
-            Button tools = Ui.HeaderBtn("Tools", delegate { OpenAutoLockPopup(); });
-            tools.ToolTip = "Keyboard, color, Windows desktop, and daily auto-lock.";
+            StackPanel actions = new StackPanel { Orientation = Orientation.Horizontal,
+                VerticalAlignment = VerticalAlignment.Center };
+            Button settings = Ui.HeaderBtn("Settings", delegate { OpenSettings(); });
+            actions.Children.Add(settings);
+            Button tools = Ui.HeaderBtn("More", delegate { OpenAutoLockPopup(); });
             actions.Children.Add(tools);
             _autoLockPopup = BuildAutoLockPopup(tools);
-
-            Button settings = Ui.HeaderBtn("Settings",
-                delegate { OpenSettings(); });
-            actions.Children.Add(settings);
-
-            Button power = Ui.HeaderBtn("Power", delegate
-            {
-                if (_powerPopup != null) _powerPopup.IsOpen = true;
-            });
+            Button power = Ui.HeaderBtn("Power", delegate { _powerPopup.IsOpen = true; });
             power.Foreground = Ui.Danger;
-            power.BorderBrush = Ui.Danger;
             power.Margin = new Thickness(0);
-            power.ToolTip = "Projector, display, lock, and dashboard power actions.";
             actions.Children.Add(power);
             _powerPopup = BuildPowerPopup(power);
-            Grid.SetColumn(actions, 2);
-            header.Children.Add(actions);
+            Grid.SetColumn(actions, 2); header.Children.Add(actions);
+            Grid.SetColumnSpan(header, 2); root.Children.Add(header);
 
-            headerCard.Child = header;
-            Grid.SetRow(headerCard, 0);
-            Grid.SetColumnSpan(headerCard, 2);
-            root.Children.Add(headerCard);
-
-            // --- Reactive sky strip + launcher grid -----------------------
-            Grid launchArea = new Grid();
+            Grid launchArea = new Grid { Margin = new Thickness(0, 0, 18, 14) };
             launchArea.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             launchArea.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-            launchArea.Children.Add(BuildSkyStrip());
-            ScrollViewer scroller = new ScrollViewer();
-            scroller.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
-            scroller.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
-            scroller.PanningMode = PanningMode.VerticalOnly;
-            scroller.Margin = new Thickness(17, 1, 17, 2);
+            DockPanel launchHeading = new DockPanel { Margin = new Thickness(0, 0, 0, 10) };
+            StackPanel launchActions = new StackPanel { Orientation = Orientation.Horizontal };
+            _previewBtn = Ui.HeaderBtn(_cfg.TabletOnlyMode ? "Screen off" : "Preview",
+                delegate { if (_cfg.TabletOnlyMode) SleepTabletDisplay(); else OpenPreview(); });
+            _previewBtn.ToolTip = _cfg.TabletOnlyMode
+                ? "Turn off the screen while audio keeps playing. Touch to wake."
+                : "See your projector here while using the trackpad.";
+            launchActions.Children.Add(_previewBtn);
+            _sleepBtn = Ui.HeaderBtn(_cfg.TabletOnlyMode ? "Hide app" : "Show clock", delegate { ToggleProjectorSleep(); });
+            _sleepBtn.ToolTip = "Hide the app without closing it. Tap again to return.";
+            launchActions.Children.Add(_sleepBtn);
+            DockPanel.SetDock(launchActions, Dock.Right); launchHeading.Children.Add(launchActions);
+            TextBlock launchTitle = Ui.Label("Your shortcuts", 23, Ui.Text);
+            launchTitle.VerticalAlignment = VerticalAlignment.Center;
+            launchHeading.Children.Add(launchTitle);
+            launchArea.Children.Add(launchHeading);
+            ScrollViewer scroller = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, PanningMode = PanningMode.VerticalOnly };
+            _tilePanel = new WrapPanel { Orientation = Orientation.Horizontal };
+            _tilePanel.SizeChanged += delegate { FitTiles(); };
+            StackPanel shortcutsAndSky = new StackPanel();
+            shortcutsAndSky.Children.Add(_tilePanel);
+            shortcutsAndSky.Children.Add(BuildSkyStrip());
+            scroller.Content = shortcutsAndSky;
+            Grid.SetRow(scroller, 1); launchArea.Children.Add(scroller);
+            Grid.SetRow(launchArea, 1); root.Children.Add(launchArea);
 
-            _tilePanel = new WrapPanel();
-            _tilePanel.Orientation = Orientation.Horizontal;
-            scroller.Content = _tilePanel;
+            Border controlsCard = new Border { Background = Ui.Panel, BorderBrush = Ui.Line,
+                BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(18),
+                Padding = new Thickness(12), Margin = new Thickness(0, 0, 18, 0) };
+            StackPanel controls = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+            controls.Children.Add(BuildVolumeRow());
+            controls.Children.Add(BuildBrightnessRow());
+            controls.Children.Add(BuildProjectorBrightnessRow());
+            controlsCard.Child = controls;
+            Grid.SetRow(controlsCard, 2); root.Children.Add(controlsCard);
 
-            Grid.SetRow(scroller, 1);
-            launchArea.Children.Add(scroller);
-            Grid.SetRow(launchArea, 1);
-            Grid.SetColumnSpan(launchArea, 2);
-            root.Children.Add(launchArea);
+            Grid remote = new Grid();
+            remote.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            remote.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+            Grid playback = new Grid { Margin = new Thickness(0, 0, 0, 12) };
+            playback.ColumnDefinitions.Add(new ColumnDefinition());
+            playback.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1.7, GridUnitType.Star) });
+            playback.ColumnDefinitions.Add(new ColumnDefinition());
+            Button back = Ui.Btn("← Back", 15, Ui.Panel, Ui.Text, delegate { SendRemoteKey(0x25); });
+            back.Padding = new Thickness(8); back.Margin = new Thickness(0, 0, 6, 0);
+            playback.Children.Add(back);
+            Button play = Ui.Btn("Play / pause", 17, Ui.AccentDim, Ui.Accent, delegate { SendRemoteKey(0x20); });
+            play.Padding = new Thickness(8); play.MinHeight = 60;
+            Grid.SetColumn(play, 1); playback.Children.Add(play);
+            Button moreRemote = Ui.Btn("Remote", 15, Ui.Panel, Ui.Text, delegate { OpenRemote(); });
+            moreRemote.Padding = new Thickness(8); moreRemote.Margin = new Thickness(6, 0, 0, 0);
+            Grid.SetColumn(moreRemote, 2); playback.Children.Add(moreRemote);
+            remote.Children.Add(playback);
+            _trackpad = new NativeTrackpad(delegate { return GetProjectorScreen(false); },
+                delegate { if (_projectorSleeping) WakeProjector(); return CurrentRemoteTarget(); },
+                delegate { ShowTouchKeyboard(); });
+            Grid.SetRow(_trackpad, 1); remote.Children.Add(_trackpad);
+            if (_cfg.TabletOnlyMode)
+            {
+                _trackpad.Visibility = Visibility.Collapsed;
+                Border touchCard = new Border { Background = Ui.Panel, CornerRadius = new CornerRadius(18),
+                    Padding = new Thickness(22), BorderBrush = Ui.Line, BorderThickness = new Thickness(1) };
+                StackPanel touchActions = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+                touchActions.Children.Add(Ui.Label("Your tablet, your remote", 22, Ui.Text));
+                touchActions.Children.Add(WrappedNote("Touch the app directly to browse, scroll, and select. Your dashboard is always one tap away."));
+                Button resume = Ui.Btn("Return to app", 18, Ui.AccentDim, Ui.Accent, delegate
+                {
+                    if (_projectorSleeping) WakeProjector();
+                    IntPtr hwnd = CurrentRemoteTarget();
+                    if (hwnd == IntPtr.Zero) return;
+                    ScreenUtil.BringAppWindowToFront(hwnd, GetProjectorScreen(false), _cfg.LaunchFullscreen);
+                    EnterTabletAppMode();
+                });
+                resume.Margin = new Thickness(0, 24, 0, 10); touchActions.Children.Add(resume);
+                Button keys = Ui.Btn("Keyboard", 17, Ui.PanelHi, Ui.Text, delegate { ShowTouchKeyboard(); });
+                keys.Margin = new Thickness(0, 0, 0, 10); touchActions.Children.Add(keys);
+                touchActions.Children.Add(Ui.Btn("Screen off · keep listening", 17, Ui.PanelHi, Ui.Text,
+                    delegate { SleepTabletDisplay(); }));
+                touchCard.Child = touchActions;
+                Grid.SetRow(touchCard, 1); remote.Children.Add(touchCard);
+            }
+            Grid.SetRow(remote, 1); Grid.SetRowSpan(remote, 2); Grid.SetColumn(remote, 1);
+            root.Children.Add(remote);
 
-            // Live one-source projector mirror. Like Settings, it leaves the
-            // bottom audio/brightness and TouchMousePointer strip available.
             _previewOverlay = BuildPreviewOverlay();
             _previewOverlay.Visibility = Visibility.Collapsed;
-            Grid.SetRow(_previewOverlay, 0);
-            Grid.SetRowSpan(_previewOverlay, 2);
-            Grid.SetColumnSpan(_previewOverlay, 2);
+            Grid.SetRow(_previewOverlay, 0); Grid.SetRowSpan(_previewOverlay, 2);
             root.Children.Add(_previewOverlay);
-
             _overheadOverlay = BuildOverheadOverlay();
-            _overheadOverlay.Visibility = Visibility.Collapsed;
-            Grid.SetRow(_overheadOverlay, 0);
-            Grid.SetRowSpan(_overheadOverlay, 2);
-            Grid.SetColumnSpan(_overheadOverlay, 2);
-            root.Children.Add(_overheadOverlay);
-
-            // --- Bottom-left: volume + tablet/projector brightness --------
-            Grid controls = new Grid();
-            controls.Margin = new Thickness(28, 10, 20, 24);
-            controls.VerticalAlignment = VerticalAlignment.Bottom;
-            controls.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-            controls.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-            controls.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-
-            controls.Children.Add(BuildVolumeRow());
-            UIElement bri = BuildBrightnessRow();
-            Grid.SetRow(bri, 1);
-            controls.Children.Add(bri);
-            UIElement projectorBri = BuildProjectorBrightnessRow();
-            Grid.SetRow(projectorBri, 2);
-            controls.Children.Add(projectorBri);
-
-            Grid.SetRow(controls, 2);
-            Grid.SetColumn(controls, 0);
-            root.Children.Add(controls);
-
-            // --- Bottom-right: reserved for TouchMousePointer --------------
-            Grid reserved = new Grid();
-            reserved.IsHitTestVisible = false;
-            reserved.Margin = new Thickness(6, 6, 10, 10);
-
-            Rectangle outline = new Rectangle();
-            outline.Stroke = Ui.Line;
-            outline.StrokeThickness = 1;
-            outline.StrokeDashArray = new DoubleCollection(new double[] { 5, 5 });
-            outline.RadiusX = 14;
-            outline.RadiusY = 14;
-            reserved.Children.Add(outline);
-
-            TextBlock reservedLabel = Ui.Label("touch pad", 14, Ui.ReservedDim);
-            reservedLabel.HorizontalAlignment = HorizontalAlignment.Center;
-            reservedLabel.VerticalAlignment = VerticalAlignment.Center;
-            reserved.Children.Add(reservedLabel);
-
-            Grid.SetRow(reserved, 2);
-            Grid.SetColumn(reserved, 1);
-            root.Children.Add(reserved);
-
-            // --- Settings overlay (hidden until opened) --------------------
             _settingsOverlay = BuildSettingsOverlay();
-            _settingsOverlay.Visibility = Visibility.Collapsed;
-            Grid.SetRow(_settingsOverlay, 0);
-            Grid.SetRowSpan(_settingsOverlay, 2); // never covers the reserved bottom strip
-            Grid.SetColumnSpan(_settingsOverlay, 2);
-            root.Children.Add(_settingsOverlay);
-
-            // Alarm covers the interactive area but deliberately leaves the
-            // entire bottom strip (including TouchMousePointer) untouched.
             _alarmOverlay = BuildAlarmOverlay();
-            _alarmOverlay.Visibility = Visibility.Collapsed;
-            Grid.SetRow(_alarmOverlay, 0);
-            Grid.SetRowSpan(_alarmOverlay, 2);
-            Grid.SetColumnSpan(_alarmOverlay, 2);
-            root.Children.Add(_alarmOverlay);
-
+            foreach (Grid overlay in new Grid[] { _overheadOverlay, _settingsOverlay, _alarmOverlay })
+            {
+                overlay.Visibility = Visibility.Collapsed;
+                Grid.SetRowSpan(overlay, 3); Grid.SetColumnSpan(overlay, 2);
+                root.Children.Add(overlay);
+            }
             return root;
+        }
+
+        private void FitTiles()
+        {
+            if (_tilePanel == null || _tilePanel.ActualWidth <= 0) return;
+            int columns = Math.Max(1, (int)(_tilePanel.ActualWidth / 205));
+            double width = Math.Max(120, Math.Floor(_tilePanel.ActualWidth / columns) - 8);
+            foreach (UIElement child in _tilePanel.Children)
+            {
+                FrameworkElement tile = child as FrameworkElement;
+                if (tile != null && Math.Abs(tile.Width - width) > 0.5) tile.Width = width;
+            }
         }
 
         private Border BuildSkyStrip()
         {
-            Border card = new Border();
-            card.Margin = new Thickness(18, 1, 18, 3);
-            card.Padding = new Thickness(14, 7, 14, 7);
-            card.Background = Ui.SurfaceLow;
-            card.BorderBrush = Ui.Line;
-            card.BorderThickness = new Thickness(1);
-            card.CornerRadius = new CornerRadius(9);
-
+            Border card = new Border { Background = Ui.SurfaceLow, CornerRadius = new CornerRadius(14),
+                Padding = new Thickness(14, 10, 14, 10), Margin = new Thickness(0, 12, 0, 0) };
             Grid grid = new Grid();
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(138) });
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            grid.ColumnDefinitions.Add(new ColumnDefinition());
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-
-            StackPanel status = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
-            _skyModeText = Ui.Label("OVERHEAD  /  LIVE", 11, Ui.Accent);
-            _skyModeText.FontWeight = FontWeights.SemiBold;
-            status.Children.Add(_skyModeText);
-            _skyCountText = Ui.Label("SET LOCATION", 15, Ui.Text);
-            _skyCountText.FontWeight = FontWeights.SemiBold;
-            status.Children.Add(_skyCountText);
-            grid.Children.Add(status);
-
-            StackPanel traffic = new StackPanel
-            {
-                Margin = new Thickness(14, 0, 16, 0),
-                VerticalAlignment = VerticalAlignment.Center
-            };
-            _aircraftSourceText = Ui.Label("AIR TRAFFIC  /  CONNECTING", 10, Ui.SourceDim);
-            traffic.Children.Add(_aircraftSourceText);
-            _aircraftText = Ui.Label("Location is not configured", 14, Ui.TextDim);
-            _aircraftText.TextTrimming = TextTrimming.CharacterEllipsis;
-            traffic.Children.Add(_aircraftText);
-            Grid.SetColumn(traffic, 1);
-            grid.Children.Add(traffic);
-
-            StackPanel orbit = new StackPanel
-            {
-                Margin = new Thickness(16, 0, 0, 0),
-                VerticalAlignment = VerticalAlignment.Center
-            };
-            orbit.Children.Add(Ui.Label("ORBIT + NIGHT SKY  /  LOCAL CALC", 10, Ui.SourceDim));
-            _orbitText = Ui.Label("ISS, planets, and major stars appear here", 14, Ui.TextDim);
-            _orbitText.TextTrimming = TextTrimming.CharacterEllipsis;
-            orbit.Children.Add(_orbitText);
-            Grid.SetColumn(orbit, 2);
-            grid.Children.Add(orbit);
-
-            StackPanel actions = new StackPanel
-            {
-                Orientation = Orientation.Horizontal,
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(12, 0, 0, 0)
-            };
-            _aircraftRangeBtn = Ui.Btn("RANGE " + _cfg.AircraftRadiusKm.ToString() + " KM",
-                12, Ui.PanelHi, Ui.Text,
-                delegate { OpenAircraftRangePopup(_aircraftRangeBtn); });
-            _aircraftRangeBtn.Height = 46;
-            _aircraftRangeBtn.MinHeight = 46;
-            _aircraftRangeBtn.Padding = new Thickness(12, 6, 12, 6);
-            _aircraftRangeBtn.Margin = new Thickness(0, 0, 8, 0);
-            actions.Children.Add(_aircraftRangeBtn);
-            _skyNetworkBtn = Ui.Btn("LIVE DATA ON", 12, Ui.AccentDim, Ui.Accent,
-                delegate { ToggleSkyNetwork(); });
-            _skyNetworkBtn.Height = 46;
-            _skyNetworkBtn.MinHeight = 46;
-            _skyNetworkBtn.Padding = new Thickness(12, 6, 12, 6);
-            _skyNetworkBtn.Margin = new Thickness(0, 0, 8, 0);
-            _skyNetworkBtn.ToolTip =
-                "Stops or resumes Sky Now aircraft and ISS requests. Weather is separate; planets and stars stay local.";
-            actions.Children.Add(_skyNetworkBtn);
-            _mainOverheadBtn = Ui.Btn("PROJECT SKY", 13, Ui.Accent, Ui.Ink,
+            StackPanel copy = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+            _skyModeText = Ui.Label("Tonight's sky", 12, Ui.Accent);
+            _skyCountText = Ui.Label("Set your location to explore", 16, Ui.Text);
+            _skyCountText.TextTrimming = TextTrimming.CharacterEllipsis;
+            copy.Children.Add(_skyModeText); copy.Children.Add(_skyCountText);
+            // Details live in the sky view, leaving the bedside summary quiet.
+            _aircraftSourceText = Ui.Label("", 12, Ui.TextDim);
+            _aircraftText = Ui.Label("", 14, Ui.TextDim);
+            _orbitText = Ui.Label("", 14, Ui.TextDim);
+            grid.Children.Add(copy);
+            StackPanel actions = new StackPanel { Orientation = Orientation.Horizontal };
+            Button details = Ui.Btn("Explore", 14, Ui.Panel, Ui.Text, delegate { OpenOverheadView(); });
+            details.Margin = new Thickness(10, 0, 8, 0); actions.Children.Add(details);
+            _mainOverheadBtn = Ui.Btn("Project sky", 14, Ui.AccentDim, Ui.Accent,
                 delegate { ToggleOverheadFromMain(); });
-            _mainOverheadBtn.Height = 46;
-            _mainOverheadBtn.MinHeight = 46;
-            _mainOverheadBtn.Padding = new Thickness(14, 6, 14, 6);
-            _mainOverheadBtn.ToolTip = "Send the ceiling sky directly to the projector; use the tablet map when no projector is available.";
             actions.Children.Add(_mainOverheadBtn);
-            Grid.SetColumn(actions, 3);
-            grid.Children.Add(actions);
-
-            _aircraftRangePopup = BuildAircraftRangePopup(_aircraftRangeBtn);
-            UpdateSkyNetworkButtons();
+            Grid.SetColumn(actions, 1); grid.Children.Add(actions);
+            _aircraftRangeBtn = null;
+            _skyNetworkBtn = null;
+            _aircraftRangePopup = BuildAircraftRangePopup(details);
             card.Child = grid;
             return card;
         }
@@ -688,14 +606,18 @@ namespace ProjectorDash
             header.ColumnDefinitions.Add(new ColumnDefinition
                 { Width = new GridLength(1, GridUnitType.Star) });
             header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            header.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            header.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             StackPanel heading = new StackPanel();
-            TextBlock title = Ui.Label("OVERHEAD  /  LIVE CEILING VIEW", 24, Ui.Text);
+            TextBlock title = Ui.Label("Tonight’s sky", 24, Ui.Text);
             title.FontWeight = FontWeights.SemiBold;
             heading.Children.Add(title);
             TextBlock explanation = Ui.Label(
                 "The live ceiling view: celestial objects use true elevation; aircraft use the selected distance range so wider searches stay readable. Bearings follow the saved heading.",
                 13, Ui.TextDim);
+            explanation.TextWrapping = TextWrapping.Wrap;
             heading.Children.Add(explanation);
+            Grid.SetColumnSpan(heading, 2);
             header.Children.Add(heading);
 
             StackPanel actions = new StackPanel { Orientation = Orientation.Horizontal };
@@ -720,7 +642,9 @@ namespace ProjectorDash
             Button back = Ui.Btn("Back", 16, Ui.Accent, Ui.Ink,
                 delegate { CloseOverheadView(); });
             actions.Children.Add(back);
-            Grid.SetColumn(actions, 1);
+            Grid.SetRow(actions, 1);
+            Grid.SetColumnSpan(actions, 2);
+            actions.Margin = new Thickness(0, 10, 0, 0);
             header.Children.Add(actions);
             inner.Children.Add(header);
 
@@ -749,6 +673,17 @@ namespace ProjectorDash
             TextBlock live = Ui.Label("LIVE STATUS", 11, Ui.Accent);
             live.FontWeight = FontWeights.SemiBold;
             infoStack.Children.Add(live);
+            _skyNetworkBtn = Ui.Btn("Live data on", 14, Ui.AccentDim, Ui.Accent,
+                delegate { ToggleSkyNetwork(); });
+            _skyNetworkBtn.Margin = new Thickness(0, 10, 0, 10);
+            infoStack.Children.Add(_skyNetworkBtn);
+            _aircraftSourceText.TextWrapping = TextWrapping.Wrap;
+            _aircraftText.TextWrapping = TextWrapping.Wrap;
+            _orbitText.TextWrapping = TextWrapping.Wrap;
+            _orbitText.Margin = new Thickness(0, 10, 0, 10);
+            infoStack.Children.Add(_aircraftSourceText);
+            infoStack.Children.Add(_aircraftText);
+            infoStack.Children.Add(_orbitText);
             _overheadFeedText = Ui.Label("Waiting for saved location", 15, Ui.Text);
             _overheadFeedText.Margin = new Thickness(0, 5, 0, 0);
             _overheadFeedText.TextWrapping = TextWrapping.Wrap;
@@ -973,7 +908,7 @@ namespace ProjectorDash
             card.CornerRadius = new CornerRadius(12);
 
             StackPanel panel = new StackPanel();
-            TextBlock title = SectionTitle("Tools");
+            TextBlock title = SectionTitle("More");
             panel.Children.Add(title);
             WrapPanel quick = new WrapPanel
             {
@@ -1045,13 +980,14 @@ namespace ProjectorDash
             Grid header = new Grid();
             header.ColumnDefinitions.Add(new ColumnDefinition
                 { Width = new GridLength(1, GridUnitType.Star) });
-            header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            header.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            header.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             StackPanel heading = new StackPanel();
             TextBlock title = Ui.Label("Live projector preview", 27, Ui.Text);
             title.FontWeight = FontWeights.SemiBold;
             heading.Children.Add(title);
             TextBlock explanation = Ui.Label(
-                "One compositor mirror of the existing app—no second tab or audio stream.",
+                "Use the trackpad to control what you see.",
                 15, Ui.TextDim);
             heading.Children.Add(explanation);
             header.Children.Add(heading);
@@ -1066,7 +1002,8 @@ namespace ProjectorDash
             Button back = Ui.Btn("Back", 17, Ui.Accent, Ui.Ink,
                 delegate { ClosePreview(); });
             actions.Children.Add(back);
-            Grid.SetColumn(actions, 1);
+            Grid.SetRow(actions, 1);
+            actions.Margin = new Thickness(0, 12, 0, 0);
             header.Children.Add(actions);
             inner.Children.Add(header);
 
@@ -1094,50 +1031,41 @@ namespace ProjectorDash
 
         private UIElement BuildVolumeRow()
         {
-            Grid row = new Grid();
-            row.Margin = new Thickness(0, 0, 0, 14);
-            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(150) });
-            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-
-            TextBlock label = Ui.Label("Output volume", 18, Ui.TextDim);
-            label.VerticalAlignment = VerticalAlignment.Center;
-            row.Children.Add(label);
-
-            _volSlider = new TouchSlider();
+            Grid row = new Grid { Margin = new Thickness(0, 0, 0, 12) };
+            row.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            row.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            DockPanel heading = new DockPanel { Margin = new Thickness(0, 0, 0, 8) };
+            _muteBtn = Ui.Btn("Mute", 14, Ui.PanelHi, Ui.Text, delegate { ToggleRemoteMute(); });
+            _muteBtn.MinHeight = 44;
+            _muteBtn.Padding = new Thickness(14, 5, 14, 5);
+            DockPanel.SetDock(_muteBtn, Dock.Right); heading.Children.Add(_muteBtn);
+            _audioDeviceBtn = Ui.Btn("", 14, Brushes.Transparent, Ui.TextDim, delegate { OpenSettings(2); });
+            _audioDeviceBtn.BorderThickness = new Thickness(0);
+            _audioDeviceBtn.MinHeight = 44;
+            _audioDeviceBtn.HorizontalContentAlignment = HorizontalAlignment.Left;
+            _audioDeviceBtn.Padding = new Thickness(0, 4, 8, 4);
+            _audioDeviceBtn.ToolTip = "Choose where sound plays";
+            heading.Children.Add(_audioDeviceBtn);
+            row.Children.Add(heading);
+            Grid volume = new Grid();
+            volume.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(52) });
+            volume.ColumnDefinitions.Add(new ColumnDefinition());
+            volume.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(52) });
+            Button quieter = Ui.Btn("−", 24, Ui.PanelHi, Ui.Text, delegate { AdjustRemoteVolume(-5); });
+            quieter.MinHeight = 48; quieter.Padding = new Thickness(0); quieter.ToolTip = "Volume down 5%";
+            volume.Children.Add(quieter);
+            _volSlider = new TouchSlider { Margin = new Thickness(10, 0, 10, 0) };
             _volSlider.ValueChanged += delegate(int v)
             {
                 if (_suppressSliderEvents) return;
                 _audio.SetVolume(v);
-                if (_audio.GetMute() && v > 0)
-                {
-                    _audio.SetMute(false);
-                    UpdateMuteButton();
-                }
+                if (_audio.GetMute() && v > 0) { _audio.SetMute(false); UpdateMuteButton(); }
             };
-            Grid.SetColumn(_volSlider, 1);
-            row.Children.Add(_volSlider);
-
-            _audioDeviceBtn = Ui.Btn("Output: " + ShortDeviceName(
-                _audio.CurrentDeviceName), 15, Ui.Panel, Ui.Text,
-                delegate { OpenSettings(2); });
-            _audioDeviceBtn.Width = 190;
-            _audioDeviceBtn.Margin = new Thickness(12, 0, 0, 0);
-            _audioDeviceBtn.ToolTip = "Choose the Windows audio output device.";
-            Grid.SetColumn(_audioDeviceBtn, 2);
-            row.Children.Add(_audioDeviceBtn);
-
-            _muteBtn = Ui.Btn("Mute", 17, Ui.Panel, Ui.Text, delegate
-            {
-                _audio.SetMute(!_audio.GetMute());
-                UpdateMuteButton();
-            });
-            _muteBtn.Margin = new Thickness(12, 0, 0, 0);
-            _muteBtn.MinWidth = 110;
-            Grid.SetColumn(_muteBtn, 3);
-            row.Children.Add(_muteBtn);
-
+            Grid.SetColumn(_volSlider, 1); volume.Children.Add(_volSlider);
+            Button louder = Ui.Btn("+", 24, Ui.PanelHi, Ui.Text, delegate { AdjustRemoteVolume(5); });
+            louder.MinHeight = 48; louder.Padding = new Thickness(0); louder.ToolTip = "Volume up 5%";
+            Grid.SetColumn(louder, 2); volume.Children.Add(louder);
+            Grid.SetRow(volume, 1); row.Children.Add(volume);
             if (!_audio.Available) row.Visibility = Visibility.Collapsed;
             return row;
         }
@@ -1145,12 +1073,12 @@ namespace ProjectorDash
         private UIElement BuildBrightnessRow()
         {
             Grid row = new Grid();
-            row.Margin = new Thickness(0, 0, 0, 10);
-            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(150) });
+            row.Margin = new Thickness(0, 0, 0, 8);
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(100) });
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
-            TextBlock label = Ui.Label("Tablet brightness", 17, Ui.TextDim);
+            TextBlock label = Ui.Label("Tablet", 15, Ui.TextDim);
             label.VerticalAlignment = VerticalAlignment.Center;
             row.Children.Add(label);
 
@@ -1160,13 +1088,13 @@ namespace ProjectorDash
                 if (_suppressSliderEvents) return;
                 bool ok = _brightness.SetBrightness(v);
                 if (_briValueText != null)
-                    _briValueText.Text = ok ? v.ToString() + "%" : "Unavailable";
+                    _briValueText.Text = ok ? v.ToString() + "%" : "N/A";
             };
             Grid.SetColumn(_briSlider, 1);
             row.Children.Add(_briSlider);
 
             _briValueText = Ui.Label("", 16, Ui.TextDim);
-            _briValueText.Width = 214;
+            _briValueText.Width = 52;
             _briValueText.Margin = new Thickness(14, 0, 0, 0);
             _briValueText.VerticalAlignment = VerticalAlignment.Center;
             Grid.SetColumn(_briValueText, 2);
@@ -1179,12 +1107,12 @@ namespace ProjectorDash
         private UIElement BuildProjectorBrightnessRow()
         {
             Grid row = new Grid();
-            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(150) });
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(100) });
             row.ColumnDefinitions.Add(new ColumnDefinition
                 { Width = new GridLength(1, GridUnitType.Star) });
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
-            TextBlock label = Ui.Label("Projector brightness", 17, Ui.TextDim);
+            TextBlock label = Ui.Label("Projector", 15, Ui.TextDim);
             label.VerticalAlignment = VerticalAlignment.Center;
             row.Children.Add(label);
 
@@ -1197,9 +1125,9 @@ namespace ProjectorDash
                     _projectorDimmer.SetBrightness(_cfg.ProjectorBrightnessPercent);
                 if (_projectorBriValueText != null)
                     _projectorBriValueText.Text =
-                        _cfg.ProjectorBrightnessPercent.ToString() + "% · image dimmer";
+                        _cfg.ProjectorBrightnessPercent.ToString() + "%";
             };
-            _projectorBriSlider.MouseLeftButtonUp += delegate
+            _projectorBriSlider.ValueCommitted += delegate
             {
                 _cfg.Save();
             };
@@ -1209,7 +1137,7 @@ namespace ProjectorDash
             row.Children.Add(_projectorBriSlider);
 
             _projectorBriValueText = Ui.Label("", 16, Ui.TextDim);
-            _projectorBriValueText.Width = 214;
+            _projectorBriValueText.Width = 52;
             _projectorBriValueText.Margin = new Thickness(14, 0, 0, 0);
             _projectorBriValueText.VerticalAlignment = VerticalAlignment.Center;
             Grid.SetColumn(_projectorBriValueText, 2);
@@ -1225,8 +1153,10 @@ namespace ProjectorDash
             // Config stores device pixels; the grid wants DIPs.
             double scale = ScreenUtil.DpiScale(this);
             if (scale <= 0) scale = 1.0;
-            _reservedCol.Width = new GridLength(_cfg.ReservedWidth / scale);
-            _bottomRow.Height = new GridLength(_cfg.ReservedHeight / scale);
+            double available = Math.Max(640, ActualWidth - 44);
+            _reservedCol.Width = new GridLength(Math.Max(300,
+                Math.Min(_cfg.ReservedWidth / scale, available * 0.42)));
+            _bottomRow.Height = new GridLength(240);
         }
 
         private void SyncAudioUi()
@@ -1255,7 +1185,7 @@ namespace ProjectorDash
             _suppressSliderEvents = true;
             _briSlider.Value = b;
             _suppressSliderEvents = false;
-            if (_briValueText != null) _briValueText.Text = b.ToString() + "% · tablet only";
+            if (_briValueText != null) _briValueText.Text = b.ToString() + "%";
         }
 
         private void SyncProjectorBrightnessUi()
@@ -1267,7 +1197,7 @@ namespace ProjectorDash
             _projectorBriSlider.Value = brightness;
             _suppressSliderEvents = false;
             if (_projectorBriValueText != null)
-                _projectorBriValueText.Text = brightness.ToString() + "% · image dimmer";
+                _projectorBriValueText.Text = brightness.ToString() + "%";
             if (_projectorDimmer != null)
                 _projectorDimmer.SetBrightness(brightness);
         }
@@ -1285,7 +1215,7 @@ namespace ProjectorDash
                 bool active = ShortcutIsActive(item);
                 string baseDetail = item.HideTarget ? "private shortcut" :
                     (item.IsWeb() ? ShortHost(item.Target) : "app");
-                string detail = active ? "ON · " + baseDetail : baseDetail;
+                string detail = active ? "Open · tap to return" : baseDetail;
                 ImageSource icon = item.IsWeb() && !item.HideTarget
                     ? SiteIconCache.TryLoad(item.Target) : null;
                 Button tile = Ui.Tile(item.Name, detail, icon,
@@ -1311,10 +1241,11 @@ namespace ProjectorDash
                 }
             }
 
-            Button add = Ui.Tile("+", "add shortcut", delegate { OpenSettings(); });
+            Button add = Ui.Tile("Add shortcut", "Make yourself at home", delegate { OpenSettings(0); });
             add.Background = Ui.SurfaceLow;
             add.BorderBrush = Ui.Line;
             _tilePanel.Children.Add(add);
+            FitTiles();
         }
 
         private bool ShortcutIsActive(ShortcutItem item)
@@ -1576,6 +1507,7 @@ namespace ProjectorDash
 
         private void OpenOverheadView()
         {
+            if (_trackpad != null) _trackpad.Cancel();
             if (!_cfg.LocationConfigured)
             {
                 OpenSettings(4);
@@ -1663,8 +1595,8 @@ namespace ProjectorDash
             {
                 bool canProject = !_cfg.TabletOnlyMode && _projector != null;
                 _mainOverheadBtn.Content = canProject
-                    ? (_projectorOverhead ? "SKY ON · STOP" : "PROJECT SKY")
-                    : "VIEW SKY";
+                    ? (_projectorOverhead ? "Stop sky" : "Project sky")
+                    : "View sky";
                 _mainOverheadBtn.Background = _projectorOverhead
                     ? Ui.AccentDim : Ui.Accent;
                 _mainOverheadBtn.Foreground = _projectorOverhead
@@ -1931,6 +1863,7 @@ namespace ProjectorDash
 
         private void OpenRemote()
         {
+            if (_trackpad != null) _trackpad.Cancel();
             WinForms.Screen tablet = ScreenUtil.FindByDevice(
                 _cfg.TabletDevice, WinForms.Screen.PrimaryScreen);
             if (_remoteWindow == null)
@@ -1939,7 +1872,9 @@ namespace ProjectorDash
                     delegate(int key) { SendRemoteKey(key); },
                     delegate(int delta) { AdjustRemoteVolume(delta); },
                     delegate { ToggleRemoteMute(); },
-                    delegate { ShowTouchKeyboard(); });
+                    delegate { ShowTouchKeyboard(); },
+                    delegate { return GetProjectorScreen(false); },
+                    delegate { if (_projectorSleeping) WakeProjector(); return CurrentRemoteTarget(); }, !_cfg.TabletOnlyMode);
             }
             if (!_remoteWindow.IsVisible) _remoteWindow.Show();
             _remoteWindow.Topmost = true;
@@ -1987,6 +1922,7 @@ namespace ProjectorDash
 
         private void SleepTabletDisplay()
         {
+            if (_trackpad != null) _trackpad.Cancel();
             if (!_cfg.TabletOnlyMode) return;
             if (_powerPopup != null) _powerPopup.IsOpen = false;
             if (_autoLockPopup != null) _autoLockPopup.IsOpen = false;
@@ -2008,6 +1944,7 @@ namespace ProjectorDash
 
         private void EnterTabletAppMode()
         {
+            if (_trackpad != null) _trackpad.Cancel();
             if (!_cfg.TabletOnlyMode) return;
             WinForms.Screen tablet = ScreenUtil.FindByDevice(
                 _cfg.TabletDevice, WinForms.Screen.PrimaryScreen);
@@ -2123,8 +2060,8 @@ namespace ProjectorDash
             try
             {
                 // The docked TabTip spans the bottom of the tablet and fights
-                // TouchMousePointer. The classic OSK is movable, so keep it in
-                // the lower-left beside the reserved touch-pad rectangle.
+                // the built-in trackpad. The classic OSK is movable, so keep it in
+                // the lower-left beside the trackpad.
                 HashSet<IntPtr> before = ScreenUtil.SnapshotTopLevelWindows();
                 Process keyboard = Process.Start("osk.exe");
                 if (keyboard != null)
@@ -2319,9 +2256,9 @@ namespace ProjectorDash
         {
             if (_sleepBtn == null) return;
             if (_cfg.TabletOnlyMode)
-                _sleepBtn.Content = _projectorSleeping ? "WAKE" : "HIDE";
+                _sleepBtn.Content = _projectorSleeping ? "Return to app" : "Hide app";
             else
-                _sleepBtn.Content = _projectorSleeping ? "WAKE" : "IDLE";
+                _sleepBtn.Content = _projectorSleeping ? "Return to app" : "Show clock";
             _sleepBtn.Background = _projectorSleeping ? Ui.AccentDim : Ui.Panel;
             _sleepBtn.BorderBrush = _projectorSleeping ? Ui.Accent : Ui.Line;
         }
@@ -2366,20 +2303,32 @@ namespace ProjectorDash
 
         private void CheckForUpdates()
         {
+            PrepareBuildChange(false);
+        }
+
+        private void RollBackBuild()
+        {
+            PrepareBuildChange(true);
+        }
+
+        private void PrepareBuildChange(bool rollback)
+        {
             if (_updateBusy) return;
             _updateBusy = true;
             _updateBtn.IsEnabled = false;
-            _updateBtn.Content = "Checking…";
+            _rollbackBtn.IsEnabled = false;
+            Button progressButton = rollback ? _rollbackBtn : _updateBtn;
+            progressButton.Content = "Checking…";
 
             Task<UpdateResult> task = Task.Factory.StartNew(
                 delegate
                 {
-                    return SelfUpdater.CheckAndDownload(
-                        delegate(string status)
-                        {
-                            Dispatcher.BeginInvoke(new Action(
-                                delegate { if (_updateBtn != null) _updateBtn.Content = status; }));
-                        });
+                    Action<string> progress = delegate(string status)
+                    {
+                        Dispatcher.BeginInvoke(new Action(delegate { progressButton.Content = status; }));
+                    };
+                    return rollback ? SelfUpdater.PrepareRollback(progress)
+                        : SelfUpdater.CheckAndDownload(progress);
                 });
             task.ContinueWith(delegate(Task<UpdateResult> completed)
             {
@@ -2400,9 +2349,19 @@ namespace ProjectorDash
                     result = completed.Result;
                 }
 
+                if (result.Kind == UpdateResultKind.Ready && rollback &&
+                    MessageBox.Show(this, "Return to Projector Dashboard " + result.ReleaseVersion +
+                        "?\n\nThe dashboard will restart. Your shortcuts, display assignments, and settings stay in place.",
+                        "Roll back dashboard", MessageBoxButton.YesNo, MessageBoxImage.Question,
+                        MessageBoxResult.No) != MessageBoxResult.Yes)
+                {
+                    SelfUpdater.DiscardDownload(result);
+                    ResetBuildChangeButtons();
+                    return;
+                }
                 if (result.Kind == UpdateResultKind.Ready)
                 {
-                    _updateBtn.Content = "Installing " + result.ReleaseVersion + "…";
+                    progressButton.Content = "Installing " + result.ReleaseVersion + "…";
                     string error;
                     if (SelfUpdater.BeginInstall(result, out error))
                     {
@@ -2414,11 +2373,18 @@ namespace ProjectorDash
                     result.Message = "Windows could not start the installer.\n\n" + error;
                 }
 
-                _updateBusy = false;
-                _updateBtn.IsEnabled = true;
-                _updateBtn.Content = "Check for update";
-                MessageBox.Show(this, result.Message, "Projector Dashboard Update");
+                ResetBuildChangeButtons();
+                MessageBox.Show(this, result.Message, rollback ? "Dashboard rollback" : "Dashboard update");
             }, TaskScheduler.FromCurrentSynchronizationContext());
+        }
+
+        private void ResetBuildChangeButtons()
+        {
+            _updateBusy = false;
+            _updateBtn.IsEnabled = true;
+            _rollbackBtn.IsEnabled = true;
+            _updateBtn.Content = "Check for update";
+            _rollbackBtn.Content = "Roll back to previous build";
         }
 
         // ------------------------------------------------------------------
@@ -2432,6 +2398,7 @@ namespace ProjectorDash
 
         private void OpenSettings(int pageIndex)
         {
+            if (_trackpad != null) _trackpad.Cancel();
             ClosePreview();
             CloseOverheadView();
             RefreshShortcutList(-1);
@@ -2504,7 +2471,17 @@ namespace ProjectorDash
                 BuildAlarmSettingsPage(),
                 BuildAmbientSettingsPage()
             };
-            foreach (Grid page in _settingsPages) pageHost.Children.Add(page);
+            foreach (Grid page in _settingsPages)
+            {
+                ScrollViewer scroll = new ScrollViewer { Content = page,
+                    VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                    HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                    PanningMode = PanningMode.VerticalOnly };
+                System.Windows.Data.Binding binding = new System.Windows.Data.Binding("Visibility");
+                binding.Source = page;
+                scroll.SetBinding(UIElement.VisibilityProperty, binding);
+                pageHost.Children.Add(scroll);
+            }
             Grid.SetRow(pageHost, 2);
             inner.Children.Add(pageHost);
 
@@ -2593,7 +2570,7 @@ namespace ProjectorDash
             Grid page = TwoColumnSettingsPage();
             StackPanel left = new StackPanel();
             left.Children.Add(SectionTitle("Projector behaviour"));
-            StackPanel modeRow = new StackPanel { Orientation = Orientation.Horizontal,
+            WrapPanel modeRow = new WrapPanel { Orientation = Orientation.Horizontal,
                 Margin = new Thickness(0, 8, 0, 8) };
             _projectorModeBtn = SmallBtn("Idle: Clock", delegate { ToggleProjectorMode(); });
             modeRow.Children.Add(_projectorModeBtn);
@@ -2606,10 +2583,10 @@ namespace ProjectorDash
             left.Children.Add(WrappedNote(
                 _cfg.TabletOnlyMode
                 ? "Tablet-only launches fullscreen here and keeps Dashboard, Screen off, and emergency-off controls above the app. Screen off leaves playback and audio running; Hide only puts the app away without closing its tabs."
-                : "Idle hides open apps and tabs without closing them, then shows the ambient screen until you wake it."));
+                : "Show clock hides open apps without closing them. Return to app restores them."));
             Button sleep = SmallBtn(_cfg.TabletOnlyMode
                 ? "Hide / restore app"
-                : "Idle / wake now", delegate { ToggleProjectorSleep(); });
+                : "Show clock / return to app", delegate { ToggleProjectorSleep(); });
             sleep.Margin = new Thickness(0, 10, 0, 0);
             left.Children.Add(sleep);
             if (_cfg.TabletOnlyMode)
@@ -2624,21 +2601,22 @@ namespace ProjectorDash
             StackPanel right = new StackPanel();
             right.Children.Add(SectionTitle("Tablet and displays"));
             right.Children.Add(WrappedNote(
-                "TouchMousePointer reserve: narrower and taller by default. Values are physical pixels."));
-            StackPanel sizeRow = new StackPanel { Orientation = Orientation.Horizontal,
-                Margin = new Thickness(0, 8, 0, 8) };
-            _editResW = Ui.Input("", 17); _editResW.Width = 100;
-            sizeRow.Children.Add(_editResW);
-            TextBlock by = Ui.Label("×", 20, Ui.TextDim);
-            by.Margin = new Thickness(8, 0, 8, 0);
-            by.VerticalAlignment = VerticalAlignment.Center;
-            sizeRow.Children.Add(by);
-            _editResH = Ui.Input("", 17); _editResH.Width = 100;
-            sizeRow.Children.Add(_editResH);
-            Button apply = SmallBtn("Apply size", delegate { ApplyReservedFromEditor(); });
-            apply.Margin = new Thickness(10, 0, 0, 0);
-            sizeRow.Children.Add(apply);
-            right.Children.Add(sizeRow);
+                "The built-in trackpad works immediately. Adjust its width and the keyboard height below (physical pixels)."));
+            _editResW = Ui.Input("", 17);
+            _editResH = Ui.Input("", 17);
+            right.Children.Add(CompactField("Pad width", _editResW));
+            right.Children.Add(CompactField("Keyboard", _editResH));
+            WrapPanel sizing = new WrapPanel { Margin = new Thickness(0, 8, 0, 8) };
+            sizing.Children.Add(SmallBtn("Compact", delegate
+            {
+                _editResW.Text = "360"; _editResH.Text = "300"; ApplyReservedFromEditor();
+            }));
+            sizing.Children.Add(SmallBtn("Roomy", delegate
+            {
+                _editResW.Text = "480"; _editResH.Text = "340"; ApplyReservedFromEditor();
+            }));
+            sizing.Children.Add(SmallBtn("Apply size", delegate { ApplyReservedFromEditor(); }));
+            right.Children.Add(sizing);
             right.Children.Add(WrappedNote(_brightness.Available
                 ? "Tablet brightness controls the built-in backlight. Projector brightness uses a saved click-through image dimmer that remains above projected apps without blocking input."
                 : "Windows does not expose tablet backlight control on this device, so that slider is hidden. The projector image dimmer remains available in two-screen mode."));
@@ -2684,10 +2662,19 @@ namespace ProjectorDash
             _updateBtn = SmallBtn("Check for update", delegate { CheckForUpdates(); });
             _updateBtn.ToolTip = "Install the latest stable dashboard release. Current: " +
                 SelfUpdater.CurrentVersion;
-            buttons.Children.Add(_updateBtn);
             right.Children.Add(buttons);
             right.Children.Add(WrappedNote(
                 "Reset now force-closes and reopens Supermium. Use it only when the browser or video playback is stuck."));
+            TextBlock version = SectionTitle("Dashboard " + SelfUpdater.CurrentVersion);
+            version.Margin = new Thickness(0, 24, 0, 10);
+            right.Children.Add(version);
+            _updateBtn.HorizontalAlignment = HorizontalAlignment.Stretch;
+            right.Children.Add(_updateBtn);
+            _rollbackBtn = Ui.Btn("Roll back to previous build", 16, Ui.PanelHi, Ui.Text,
+                delegate { RollBackBuild(); });
+            _rollbackBtn.Margin = new Thickness(0, 8, 0, 0);
+            right.Children.Add(_rollbackBtn);
+            right.Children.Add(WrappedNote("Rollback uses your saved previous build, or downloads the previous stable release. You’ll see the version before restarting. Your settings are kept."));
             Grid.SetColumn(right, 2);
             page.Children.Add(right);
             return page;
@@ -3068,10 +3055,10 @@ namespace ProjectorDash
         {
             bool enabled = _cfg.SkyNetworkEnabled;
             if (_skyModeText != null)
-                _skyModeText.Text = enabled ? "OVERHEAD  /  LIVE" : "OVERHEAD  /  LOCAL ONLY";
+                _skyModeText.Text = enabled ? "Tonight’s sky · live" : "Tonight’s sky · offline";
             if (_skyNetworkBtn != null)
             {
-                _skyNetworkBtn.Content = enabled ? "LIVE DATA ON" : "LIVE DATA OFF";
+                _skyNetworkBtn.Content = enabled ? "Live data on" : "Live data off";
                 _skyNetworkBtn.Background = enabled ? Ui.AccentDim : Ui.PanelHi;
                 _skyNetworkBtn.Foreground = enabled ? Ui.Accent : Ui.TextDim;
                 _skyNetworkBtn.BorderBrush = enabled ? Ui.Accent : Ui.Line;
@@ -3222,13 +3209,13 @@ namespace ProjectorDash
             if (!_cfg.LocationConfigured)
             {
                 _weatherTempText.Text = "--";
-                _weatherConditionText.Text = "SET LOCATION";
+                _weatherConditionText.Text = "Set your location";
                 _weatherMetaText.Text = "Settings › Ambient";
                 UpdateSunriseText(DateTime.Now);
-                _skyCountText.Text = "SET LOCATION";
+                _skyCountText.Text = "Set your location";
                 if (_aircraftSourceText != null)
                     _aircraftSourceText.Text = "AIR TRAFFIC  /  LOCATION NEEDED";
-                _aircraftText.Text = "Location is not configured";
+                _aircraftText.Text = "Set a location in Settings › Ambient";
                 _orbitText.Text = "ISS, planets, and major stars appear here";
                 if (_projector != null)
                 {
@@ -3244,7 +3231,7 @@ namespace ProjectorDash
             {
                 string degree = Math.Round(_weather.Temperature).ToString("0") + "°";
                 _weatherTempText.Text = degree;
-                _weatherConditionText.Text = _weather.Condition.ToUpperInvariant();
+                _weatherConditionText.Text = _weather.Condition;
                 _weatherMetaText.Text = "Feels " + Math.Round(_weather.FeelsLike).ToString("0") + "°  ·  H " +
                     Math.Round(_weather.High).ToString("0") + "° / L " +
                     Math.Round(_weather.Low).ToString("0") + "°  ·  Wind " +
@@ -3260,14 +3247,14 @@ namespace ProjectorDash
             else
             {
                 _weatherTempText.Text = "--";
-                _weatherConditionText.Text = "LOADING WEATHER";
+                _weatherConditionText.Text = "Checking the weather";
                 _weatherMetaText.Text = _cfg.LocationName;
                 UpdateSunriseText(DateTime.Now);
             }
 
             if (_sky == null)
             {
-                _skyCountText.Text = "SCANNING";
+                _skyCountText.Text = "Checking the sky";
                 if (_aircraftSourceText != null)
                     _aircraftSourceText.Text = "AIR TRAFFIC  /  CONNECTING";
                 _aircraftText.Text = "Checking nearby airspace…";
@@ -3278,15 +3265,15 @@ namespace ProjectorDash
 
             if (!_cfg.SkyNetworkEnabled || !_sky.ExternalFeedsEnabled)
             {
-                _skyCountText.Text = "LIVE DATA OFF";
+                _skyCountText.Text = "Live data off";
                 if (_aircraftSourceText != null)
                     _aircraftSourceText.Text = "AIR TRAFFIC  /  REQUESTS DISABLED";
                 _aircraftText.Text =
-                    "No Sky Now network polling · tap LIVE DATA OFF to resume";
+                    "Live feeds are paused · turn Live data on to resume";
             }
             else if (!_sky.AircraftFeedAvailable)
             {
-                _skyCountText.Text = "FEED OFFLINE";
+                _skyCountText.Text = "Aircraft feed unavailable";
                 if (_aircraftSourceText != null)
                     _aircraftSourceText.Text = "AIR TRAFFIC  /  BOTH FREE FEEDS FAILED";
                 _aircraftText.Text = (_sky.AircraftError.Length == 0
@@ -3299,8 +3286,8 @@ namespace ProjectorDash
                     _aircraftSourceText.Text = "AIR TRAFFIC  /  " +
                         (_sky.AircraftFeedName.Length == 0
                             ? "LIVE ADS-B" : _sky.AircraftFeedName.ToUpperInvariant());
-                _skyCountText.Text = _sky.Planes.Count == 0 ? "CLEAR AIRSPACE" :
-                    _sky.Planes.Count.ToString() + (_sky.Planes.Count == 1 ? " AIRCRAFT" : " AIRCRAFT");
+                _skyCountText.Text = _sky.Planes.Count == 0 ? "Clear skies nearby" :
+                    _sky.Planes.Count.ToString() + " aircraft nearby";
                 List<string> traffic = new List<string>();
                 int trafficLimit = Math.Min(4, _sky.Planes.Count);
                 for (int trafficIndex = 0; trafficIndex < trafficLimit; trafficIndex++)
@@ -3861,16 +3848,8 @@ namespace ProjectorDash
         {
             DateTime time = DateTime.Today.AddHours(_cfg.AutoLockHour)
                 .AddMinutes(_cfg.AutoLockMinute);
-            string label = _cfg.AutoLockEnabled
-                ? "Auto-lock: " + time.ToString("h:mm tt") : "Auto-lock: Off";
             if (_autoLockTimePickerText != null)
                 _autoLockTimePickerText.Text = time.ToString("h:mm tt");
-            if (_autoLockBtn != null)
-            {
-                _autoLockBtn.Content = label;
-                _autoLockBtn.Background = _cfg.AutoLockEnabled ? Ui.AccentDim : Ui.Panel;
-                _autoLockBtn.BorderBrush = _cfg.AutoLockEnabled ? Ui.Accent : Ui.Line;
-            }
             if (_autoLockToggleBtn != null)
             {
                 _autoLockToggleBtn.Content = _cfg.AutoLockEnabled
@@ -3949,6 +3928,7 @@ namespace ProjectorDash
 
         private void StartRinging(DateTime now)
         {
+            if (_trackpad != null) _trackpad.Cancel();
             if (_alarmOverlay == null) return;
             if (_tabletAppMode || _mirrorFullscreen) ReturnToDashboard();
             ClosePreview();

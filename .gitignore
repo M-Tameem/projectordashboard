@@ -9,3 +9,9 @@ ProjectorDashboard-*-win-x86.zip
 .visual-check/
 *.user
 *.suo
+
+**/bin/
+**/obj/
+Dashboard.exe.rollback
+Dashboard.exe.rollback.sha256
+Dashboard.exe.rollback.tmp

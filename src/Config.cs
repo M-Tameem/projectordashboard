@@ -60,7 +60,7 @@ namespace ProjectorDash
         // back to the normal two-screen setup.
         public bool TabletOnlyMode = false;
 
-        // Area in the bottom-right of the tablet kept free for TouchMousePointer, in pixels.
+        // Native trackpad width and keyboard height in pixels. Legacy XML names preserved.
         public int ReservedWidth = 420;
         public int ReservedHeight = 340;
 
